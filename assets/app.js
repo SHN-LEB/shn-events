@@ -394,7 +394,7 @@
 
   function staffHtml(staff) {
     if (!staff.length) {
-      return '<div class="card card-pad muted">No staff yet. Add each employee in the <b>Staff</b> tab of the event\'s Google Sheet, with their hourly rate and commission tiers.</div>';
+      return '<div class="card card-pad muted">No staff yet. Add each employee in the event\'s Google Sheet: <b>Settings</b> tab, staff columns E–J, with their hourly rate and commission tiers.</div>';
     }
     return '<div class="card table-wrap"><table class="tbl"><thead><tr><th>Name</th><th class="num">Hourly rate</th>' +
       '<th class="num">Commission under threshold</th><th class="num">Threshold</th><th class="num">Commission at/over</th><th>Status</th></tr></thead><tbody>' +
@@ -424,9 +424,9 @@
     if (!items.length) {
       body.innerHTML = warningsHtml(data.warnings) +
         '<div class="card empty"><h2>No products yet</h2>' +
-        '<p class="muted">In the event\'s Google Sheet, open the <b>Products</b> tab. Pick or paste product names in the <b>Product</b> column, ' +
+        '<p class="muted">In the event\'s Google Sheet, open the <b>Listing</b> tab. Pick or paste product names in the <b>Product</b> column, ' +
         'then type the <b>Opening Qty</b> and <b>Demo Qty</b>. Ref Code, category and price fill in by themselves.</p>' +
-        '<p class="muted">Partner products go in the <b>Consignment</b> tab.</p>' +
+        '<p class="muted">Partner products go in the consignment columns (I–R) of the same tab.</p>' +
         '<a class="btn btn-primary" href="' + esc(ev.sheetUrl) + '" target="_blank" rel="noopener">Open Google Sheet</a> ' +
         '<button class="btn btn-ghost" id="invRefresh">Refresh</button></div>';
       document.getElementById('invRefresh').onclick = function () { state.inv = null; viewInventory(body, ev); };
@@ -457,7 +457,7 @@
       '<button class="btn btn-ghost" id="invRefresh">Refresh</button></div>' +
       '<div id="invList"></div>' +
       '<p class="small muted">Live stock = opening + refills/returns − sold. Demo units are counted separately and never sold. ' +
-      'Edit quantities in the event\'s Google Sheet (Products, Consignment and Stock Moves tabs), then Refresh.</p>';
+      'Edit quantities in the event\'s Google Sheet (Listing and Stock Moves tabs), then Refresh.</p>';
     document.getElementById('invRefresh').onclick = function () { state.inv = null; viewInventory(body, ev); };
     var search = document.getElementById('invSearch');
     search.oninput = function () { state.invQuery = search.value; drawInvList(items); };

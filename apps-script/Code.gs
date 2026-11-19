@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -45,20 +45,28 @@ const MAX_ROWS = 1000; // rows prepared with dropdowns and formulas in event tab
 const EVENT_TYPES = ['Sales', 'Awareness'];
 
 /* Every tab of an event sheet. Settings is a key/value tab; the rest are tables. */
+/* Every tab of an event sheet. '' leaves an empty separator column between blocks.
+   Settings: A-C event settings, E-J staff list, L-P this event's catalogue.
+   Listing:  A-G products from the catalogue, I-R consignment items, T all product names (hidden helper). */
+const STAFF_COL = 5;      // Settings!E
+const CATALOG_COL = 12;   // Settings!L
+const CONS_COL = 9;       // Listing!I
+const ALL_NAMES_COL = 20; // Listing!T
 const EVENT_TABS = [
-  ['Settings', ['Setting', 'Value', 'Notes']],
-  ['Staff', ['Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/item)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/item)', 'Active (Y/N)']],
-  ['Products', ['Ref Code', 'Category', 'Game Family', 'Price (USD)', 'Product', 'Opening Qty', 'Demo Qty']],
-  ['Consignment', ['Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL']],
+  ['Settings', ['Setting', 'Value', 'Notes', '',
+    'Staff Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/item)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/item)', 'Active (Y/N)', '',
+    'Catalogue: Product', 'Ref Code', 'Price (USD)', 'Category', 'Game Family']],
+  ['Listing', ['Ref Code', 'Category', 'Game Family', 'Price (USD)', 'Product', 'Opening Qty', 'Demo Qty', '',
+    'Consignment: Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL', '',
+    'All Products (auto)']],
   ['Stock Moves', ['Date', 'Ref Code', 'Product', 'Qty (+refill / -return)', 'Note']],
-  ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Kind (Sellable/Demo)', 'Expected', 'Counted', 'Difference', 'Counted By']],
   ['Sales', ['Sale ID', 'Line', 'Date', 'Time', 'Seller', 'Ref Code', 'Product', 'Category', 'Qty', 'Unit Price (USD)', 'Discount %', 'Line Total (USD)', 'Payment Method', 'Online (USD)', 'Received USD', 'Received LBP', 'Change USD', 'Change LBP', 'Rounding (USD)', 'VAT (USD)', 'Void', 'Void Reason', 'Logged At']],
-  ['Cash', ['Date Time', 'Kind (Handover/Count)', 'USD', 'LBP', 'From', 'To', 'Note']],
   ['Shifts', ['Date', 'Employee', 'Clock In', 'Clock Out', 'Hours', 'Note']],
+  ['Cash', ['Date Time', 'Kind (Handover/Count)', 'USD', 'LBP', 'From', 'To', 'Note']],
+  ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Kind (Sellable/Demo)', 'Expected', 'Counted', 'Difference', 'Counted By']],
   ['Expenses', ['Date', 'Type', 'Description', 'Amount USD', 'Amount LBP', 'Total USD']],
   ['P&L', ['Line', 'USD']],
-  ['Sales Tracker', ['Date', 'Product Code', 'Description', 'Qty', 'Total Sales $', 'Country', 'Channel', 'Channel Type', 'Warehouse', 'Delivered by', 'Sales Date', 'Invoice Date', 'Invoice number', 'Parent Account', 'Customer', 'Branch', 'Product Ref.', 'Description', 'Quantity', 'Unit Amount HT (Invoiced)', 'Currency', 'Total Amount HT (Invoiced)', 'Total VAT (Invoiced)']],
-  ['Catalogue', ['Product', 'Ref Code', 'Price (USD)', 'Category', 'Game Family']]
+  ['Sales Tracker', ['Date', 'Product Code', 'Description', 'Qty', 'Total Sales $', 'Country', 'Channel', 'Channel Type', 'Warehouse', 'Delivered by', 'Sales Date', 'Invoice Date', 'Invoice number', 'Parent Account', 'Customer', 'Branch', 'Product Ref.', 'Description', 'Quantity', 'Unit Amount HT (Invoiced)', 'Currency', 'Total Amount HT (Invoiced)', 'Total VAT (Invoiced)']]
 ];
 
 /* ------------------------------------------------------------------ setup */
@@ -113,7 +121,8 @@ function ensureMasterTabs_(ss) {
 }
 
 function writeHeader_(sh, headers) {
-  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#eef1f6');
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+  headers.forEach(function (h, i) { if (h) sh.getRange(1, i + 1).setBackground('#eef1f6'); });
   sh.setFrozenRows(1);
 }
 
@@ -321,7 +330,8 @@ function buildEventSheet_(ss, ev, catalogue) {
     return [r[0], String(r[1]), r[2]];
   }));
   sh.getRange(2, 1, settings.length, 1).setFontWeight('bold');
-  sh.autoResizeColumns(1, 3);
+  sh.setColumnWidth(1, 210);
+  sh.setColumnWidth(3, 300);
   ss.getSheetByName('P&L').getRange(2, 1).setValue('Built automatically in a later phase.');
   buildInventoryTabs_(ss, catalogue || []);
 }
@@ -395,60 +405,68 @@ function loadCatalogue_() {
   return out;
 }
 
-function lookupFormula_(header, keyCol, col) {
-  return '={"' + header + '";ARRAYFORMULA(IF(' + keyCol + '2:' + keyCol + '="","",IFERROR(VLOOKUP(' +
-    keyCol + '2:' + keyCol + ',Catalogue!A2:E,' + col + ',FALSE),"")))}';
+function colLetter_(n) {
+  let s = '';
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
 }
 
 function buildInventoryTabs_(ss, catalogue) {
   const grey = '#f1f3f6';
   const red = '#f8d7d4';
+  const strict = function (range) {
+    return SpreadsheetApp.newDataValidation().requireValueInRange(range, true).setAllowInvalid(false).build();
+  };
+  const list = function (values) {
+    return SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(false).build();
+  };
+  const C = colLetter_(CATALOG_COL), C2 = colLetter_(CATALOG_COL + 4); // L..P
+  const catRange = 'Settings!' + C + '2:' + C2;
 
-  // Catalogue: this event's own copy (prices locked for the event)
-  const cat = ss.getSheetByName('Catalogue');
+  // Settings: staff block + this event's catalogue (prices locked for the event)
+  const set = ss.getSheetByName('Settings');
   if (catalogue.length) {
-    cat.getRange(2, 2, catalogue.length, 1).setNumberFormat('@');
-    cat.getRange(2, 1, catalogue.length, 5).setValues(catalogue);
-    cat.getRange(2, 3, catalogue.length, 1).setNumberFormat('$#,##0.00');
+    set.getRange(2, CATALOG_COL + 1, catalogue.length, 1).setNumberFormat('@');
+    set.getRange(2, CATALOG_COL, catalogue.length, 5).setValues(catalogue);
+    set.getRange(2, CATALOG_COL + 2, catalogue.length, 1).setNumberFormat('$#,##0.00');
   }
-  cat.setColumnWidth(1, 340);
+  set.setColumnWidth(CATALOG_COL, 320);
+  set.setColumnWidth(STAFF_COL, 160);
+  set.getRange(2, STAFF_COL + 5, MAX_ROWS, 1).setDataValidation(list(['Y', 'N']));
+  set.getRange(2, STAFF_COL + 1, MAX_ROWS, 1).setNumberFormat('$#,##0.00');
 
-  // Products: Ref Code, Category, Game Family, Price are looked up from the product name
-  const prod = ss.getSheetByName('Products');
-  prod.getRange(1, 1).setFormula(lookupFormula_('Ref Code', 'E', 2));
-  prod.getRange(1, 2).setFormula(lookupFormula_('Category', 'E', 4));
-  prod.getRange(1, 3).setFormula(lookupFormula_('Game Family', 'E', 5));
-  prod.getRange(1, 4).setFormula(lookupFormula_('Price (USD)', 'E', 3));
-  prod.getRange(2, 1, MAX_ROWS, 4).setBackground(grey);
-  prod.getRange(2, 4, MAX_ROWS, 1).setNumberFormat('$#,##0.00');
-  prod.getRange(2, 5, MAX_ROWS, 1).setDataValidation(
-    SpreadsheetApp.newDataValidation().requireValueInRange(cat.getRange('A2:A'), true).setAllowInvalid(true).build());
-  prod.setColumnWidth(5, 340);
+  // Listing: Ref Code, Category, Game Family, Price looked up from the product name
+  const lst = ss.getSheetByName('Listing');
+  const look = function (header, col) {
+    return '={"' + header + '";ARRAYFORMULA(IF(E2:E="","",IFERROR(VLOOKUP(E2:E,' + catRange + ',' + col + ',FALSE),"")))}';
+  };
+  lst.getRange(1, 1).setFormula(look('Ref Code', 2));
+  lst.getRange(1, 2).setFormula(look('Category', 4));
+  lst.getRange(1, 3).setFormula(look('Game Family', 5));
+  lst.getRange(1, 4).setFormula(look('Price (USD)', 3));
+  lst.getRange(2, 1, MAX_ROWS, 4).setBackground(grey);
+  lst.getRange(2, 4, MAX_ROWS, 1).setNumberFormat('$#,##0.00');
+  lst.getRange(2, 5, MAX_ROWS, 1).setDataValidation(strict(set.getRange(C + '2:' + C)));
+  lst.setColumnWidth(5, 320);
+  // consignment block (I-R): typed by hand
+  lst.getRange(2, CONS_COL + 3, MAX_ROWS, 1).setNumberFormat('$#,##0.00');
+  lst.getRange(2, CONS_COL + 7, MAX_ROWS, 1).setDataValidation(list(['Fixed', '%']));
+  lst.setColumnWidth(CONS_COL, 260);
+  // hidden helper: every product name of this event, for the Stock Moves dropdown
+  lst.getRange(1, ALL_NAMES_COL).setFormula('={"All Products (auto)";IFERROR(FILTER({E2:E;I2:I},{E2:E;I2:I}<>""),"")}');
+  lst.hideColumns(ALL_NAMES_COL);
 
-  // Stock Moves: product dropdown from this event's products; Ref Code looked up
+  // Stock Moves: dropdown of this event's products (listing + consignment)
   const moves = ss.getSheetByName('Stock Moves');
-  moves.getRange(1, 2).setFormula('={"Ref Code";ARRAYFORMULA(IF(C2:C="","",IFERROR(VLOOKUP(C2:C,{Products!E2:E,Products!A2:A},2,FALSE),IFERROR(VLOOKUP(C2:C,{Consignment!A2:A,Consignment!B2:B},2,FALSE),""))))}');
+  moves.getRange(1, 2).setFormula('={"Ref Code";ARRAYFORMULA(IF(C2:C="","",IFERROR(VLOOKUP(C2:C,{Listing!E2:E,Listing!A2:A},2,FALSE),IFERROR(VLOOKUP(C2:C,{Listing!I2:I,Listing!J2:J},2,FALSE),""))))}');
   moves.getRange(2, 2, MAX_ROWS, 1).setBackground(grey);
   moves.getRange(2, 1, MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');
-  moves.getRange(2, 3, MAX_ROWS, 1).setDataValidation(
-    SpreadsheetApp.newDataValidation().requireValueInRange(prod.getRange('E2:E'), true).setAllowInvalid(true).build());
-  moves.setColumnWidth(3, 340);
+  moves.getRange(2, 3, MAX_ROWS, 1).setDataValidation(strict(lst.getRange('T2:T')));
+  moves.setColumnWidth(3, 320);
 
-  // Consignment: typed by hand
-  const cons = ss.getSheetByName('Consignment');
-  cons.getRange(2, 8, MAX_ROWS, 1).setDataValidation(
-    SpreadsheetApp.newDataValidation().requireValueInList(['Fixed', '%'], true).setAllowInvalid(false).build());
-  cons.getRange(2, 4, MAX_ROWS, 1).setNumberFormat('$#,##0.00');
-  cons.setColumnWidth(1, 300);
-
-  // Staff
-  const staff = ss.getSheetByName('Staff');
-  staff.getRange(2, 6, MAX_ROWS, 1).setDataValidation(
-    SpreadsheetApp.newDataValidation().requireValueInList(['Y', 'N'], true).setAllowInvalid(false).build());
-
-  // names that don't match turn red
-  prod.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied('=AND($E2<>"",$A2="")').setBackground(red).setRanges([prod.getRange(2, 5, MAX_ROWS, 1)]).build()]);
+  // safety net: a name that no longer matches (catalogue edited) turns red
+  lst.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=AND($E2<>"",$A2="")').setBackground(red).setRanges([lst.getRange(2, 5, MAX_ROWS, 1)]).build()]);
   moves.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
     .whenFormulaSatisfied('=AND($C2<>"",$B2="")').setBackground(red).setRanges([moves.getRange(2, 3, MAX_ROWS, 1)]).build()]);
 }
@@ -457,7 +475,7 @@ function buildInventoryTabs_(ss, catalogue) {
 function getInventory_(id) {
   const ev = rowToEvent_(findEventRow_(id).values);
   const ss = SpreadsheetApp.openById(ev.sheetId);
-  ['Products', 'Consignment', 'Stock Moves', 'Sales'].forEach(function (t) {
+  ['Listing', 'Stock Moves', 'Sales'].forEach(function (t) {
     if (!ss.getSheetByName(t)) throw userError_('This event was created with an older version of the app. Create a new event.', 'old_event');
   });
   const warnings = [];
@@ -477,38 +495,39 @@ function getInventory_(id) {
   }
   function qty(v) { const n = Number(v); return isNaN(n) ? 0 : n; }
 
-  const prod = ss.getSheetByName('Products').getDataRange().getValues();
+  const lstSheet = ss.getSheetByName('Listing');
+  const prod = lstSheet.getDataRange().getValues();
   for (let i = 1; i < prod.length; i++) {
     const r = prod[i];
     const name = String(r[4] || '').trim();
     if (!name) continue;
     const ref = String(r[0] || '').trim();
-    if (!ref) { warnings.push('Products row ' + (i + 1) + ': "' + name + '" is not in the event catalogue, so it is ignored.'); continue; }
+    if (!ref) { warnings.push('Listing row ' + (i + 1) + ': "' + name + '" is not in the event catalogue, so it is ignored.'); continue; }
     add({ ref: ref, name: name, category: String(r[1] || ''), family: String(r[2] || ''), price: parseMoney_(r[3]),
-      opening: qty(r[5]), demo: qty(r[6]), moves: 0, sold: 0, consignment: false }, 'Products');
+      opening: qty(r[5]), demo: qty(r[6]), moves: 0, sold: 0, consignment: false }, 'Listing');
   }
 
-  const consSheet = ss.getSheetByName('Consignment');
-  const cons = consSheet.getDataRange().getValues();
+  // consignment block: Listing I-R
+  const K = CONS_COL - 1;
   const usedC = {};
-  cons.slice(1).forEach(function (r) { const m = String(r[1] || '').match(/^C(\d+)$/); if (m) usedC[Number(m[1])] = true; });
+  prod.slice(1).forEach(function (r) { const m = String(r[K + 1] || '').match(/^C(\d+)$/); if (m) usedC[Number(m[1])] = true; });
   let nextC = 1;
-  for (let i = 1; i < cons.length; i++) {
-    const r = cons[i];
-    const name = String(r[0] || '').trim();
+  for (let i = 1; i < prod.length; i++) {
+    const r = prod[i];
+    const name = String(r[K] || '').trim();
     if (!name) continue;
-    let ref = String(r[1] || '').trim();
+    let ref = String(r[K + 1] || '').trim();
     if (!ref) {
       while (usedC[nextC]) nextC++;
       usedC[nextC] = true;
       ref = 'C' + ('00' + nextC).slice(-3);
-      consSheet.getRange(i + 1, 2).setValue(ref);
+      lstSheet.getRange(i + 1, CONS_COL + 1).setValue(ref);
     }
-    const price = parseMoney_(r[3]);
+    const price = parseMoney_(r[K + 3]);
     if (!price) warnings.push('Consignment row ' + (i + 1) + ': "' + name + '" has no price.');
-    add({ ref: ref, name: name, category: String(r[2] || '') || 'Consignment', family: '', price: price,
-      opening: qty(r[4]), demo: qty(r[5]), moves: 0, sold: 0, consignment: true,
-      partner: String(r[6] || ''), payType: String(r[7] || ''), payValue: qty(r[8]), picture: String(r[9] || '') }, 'Consignment');
+    add({ ref: ref, name: name, category: String(r[K + 2] || '') || 'Consignment', family: '', price: price,
+      opening: qty(r[K + 4]), demo: qty(r[K + 5]), moves: 0, sold: 0, consignment: true,
+      partner: String(r[K + 6] || ''), payType: String(r[K + 7] || ''), payValue: qty(r[K + 8]), picture: String(r[K + 9] || '') }, 'Consignment');
   }
 
   const moves = ss.getSheetByName('Stock Moves').getDataRange().getValues();
@@ -540,16 +559,16 @@ function getInventory_(id) {
 }
 
 function readStaff_(ss) {
-  const sh = ss.getSheetByName('Staff');
-  if (!sh) return [];
-  return sh.getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim(); }).map(function (r) {
+  const sh = ss.getSheetByName('Settings');
+  const K = STAFF_COL - 1;
+  return sh.getDataRange().getValues().slice(1).filter(function (r) { return String(r[K] || '').trim(); }).map(function (r) {
     return {
-      name: String(r[0]).trim(),
-      hourlyRate: parseMoney_(r[1]),
-      commissionUnder: parseMoney_(r[2]),
-      threshold: parseMoney_(r[3]),
-      commissionOver: parseMoney_(r[4]),
-      active: String(r[5] || 'Y').trim().toUpperCase() !== 'N'
+      name: String(r[K]).trim(),
+      hourlyRate: parseMoney_(r[K + 1]),
+      commissionUnder: parseMoney_(r[K + 2]),
+      threshold: parseMoney_(r[K + 3]),
+      commissionOver: parseMoney_(r[K + 4]),
+      active: String(r[K + 5] || 'Y').trim().toUpperCase() !== 'N'
     };
   });
 }
