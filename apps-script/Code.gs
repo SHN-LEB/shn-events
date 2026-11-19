@@ -13,7 +13,7 @@ const APP_VERSION = '1.0.1';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
-const EVENTS_FOLDER_ID = '';
+const EVENTS_FOLDER_ID = '1JkQzc0GkBpx6OvErqHcBe2VYljxhtjxh';
 const TOKEN_HOURS = 12;
 
 const MASTER_TABS = {
