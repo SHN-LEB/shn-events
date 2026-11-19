@@ -1,4 +1,4 @@
-# SHN Events
+# SHN LEB Events
 
 Event sales portal for Superheated Neurons: events home, per-event POS, inventory, cash, shifts, expenses and P&L.
 

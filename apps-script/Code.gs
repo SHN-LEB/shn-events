@@ -1,5 +1,5 @@
 /**
- * SHN Events Portal — back office (Google Apps Script)
+ * SHN LEB Events Portal — back office (Google Apps Script)
  *
  * The web app on GitHub Pages talks only to this script. The script owns:
  *   - the master sheet  "SHN Events — Master"  (events list + settings)
@@ -61,7 +61,7 @@ function setup() {
   const folderId = props.getProperty('FOLDER_ID');
   if (folderId) { try { folder = DriveApp.getFolderById(folderId); } catch (e) { folder = null; } }
   if (!folder) {
-    folder = DriveApp.createFolder('SHN Events');
+    folder = DriveApp.createFolder('SHN LEB Events');
     props.setProperty('FOLDER_ID', folder.getId());
   }
 
@@ -69,7 +69,7 @@ function setup() {
   const masterId = props.getProperty('MASTER_ID');
   if (masterId) { try { master = SpreadsheetApp.openById(masterId); } catch (e) { master = null; } }
   if (!master) {
-    master = SpreadsheetApp.create('SHN Events — Master');
+    master = SpreadsheetApp.create('SHN LEB Events — Master');
     DriveApp.getFileById(master.getId()).moveTo(folder);
     props.setProperty('MASTER_ID', master.getId());
   }
@@ -107,7 +107,7 @@ function writeHeader_(sh, headers) {
 /* ------------------------------------------------------------------ http */
 
 function doGet() {
-  return json_({ ok: true, app: 'SHN Events', version: APP_VERSION });
+  return json_({ ok: true, app: 'SHN LEB Events', version: APP_VERSION });
 }
 
 function doPost(e) {
@@ -251,7 +251,7 @@ function createEvent_(req) {
     do { id = newId_(); } while (existing.indexOf(id) >= 0);
 
     const folder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty('FOLDER_ID'));
-    const ss = SpreadsheetApp.create('SHN Event — ' + name + ' (' + start + ')');
+    const ss = SpreadsheetApp.create('SHN LEB Event — ' + name + ' (' + start + ')');
     DriveApp.getFileById(ss.getId()).moveTo(folder);
 
     const event = { id: id, name: name, type: type, venue: venue, startDate: start, endDate: end, status: 'Open' };
