@@ -1,4 +1,4 @@
-/* SHN Events — web app (Phase 1: admin login, events home, new event, event page) */
+/* SHN LEB Events — web app (Phase 2: + inventory, staff) */
 (function () {
   'use strict';
 
@@ -6,7 +6,7 @@
   var TOKEN_KEY = 'shn-events-admin';
   var TABS = [
     { id: 'settings', label: 'Settings' },
-    { id: 'inventory', label: 'Inventory', phase: 2 },
+    { id: 'inventory', label: 'Inventory' },
     { id: 'pos', label: 'POS', phase: 3 },
     { id: 'cash', label: 'Cash', phase: 4 },
     { id: 'shifts', label: 'Shifts', phase: 4 },
@@ -26,7 +26,7 @@
 
   var app = document.getElementById('app');
   var topbarRight = document.getElementById('topbarRight');
-  var state = { events: null, filter: 'all', event: null };
+  var state = { events: null, filter: 'all', event: null, inv: null, invQuery: '', invCat: '' };
 
   /* ---------------- storage (wrapped: some browsers block it) */
   function getToken() {
@@ -104,7 +104,7 @@
     return { key: 'live', label: 'Live' };
   }
   function num(n) { return Number(n || 0).toLocaleString('en-US'); }
-  function money(n) { return '$' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 }); }
+  function money(n) { n = Number(n || 0); return '$' + n.toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 }); }
 
   var toastTimer;
   function toast(msg, bad) {
@@ -290,6 +290,7 @@
 
   function viewEvent(id, tab) {
     if (!state.event || state.event.id !== id) {
+      state.inv = null;
       loading('Opening event…');
       api('getEvent', { id: id }).then(function (res) {
         state.event = res.event;
@@ -334,6 +335,7 @@
 
     var body = document.getElementById('tabBody');
     if (tab === 'settings') body.innerHTML = settingsHtml(ev);
+    else if (tab === 'inventory') viewInventory(body, ev);
     else {
       var def = TABS.filter(function (t) { return t.id === tab; })[0] || TABS[0];
       body.innerHTML = '<div class="card placeholder"><h2>' + esc(def.label) + '</h2>' +
@@ -381,12 +383,126 @@
       item('Units per day', s.dailyTargetQty == null ? 'Not set' : num(s.dailyTargetQty), s.dailyTargetQty == null) +
       item('Sales per day', s.dailyTargetSales == null ? 'Not set' : money(s.dailyTargetSales), s.dailyTargetSales == null) +
       '</div>' +
+      '<h2 class="section-title">Staff</h2>' + staffHtml(ev.staff || []) +
       '<h2 class="section-title">Staff access</h2>' +
       '<div class="kv">' + item('PIN', esc(s.pin || '—')) + '</div>' +
       '<div class="card card-pad" style="margin-top:12px">' +
       '<div class="small muted" style="margin-bottom:8px">Staff link (the POS opens here from phase 3)</div>' +
       '<div class="share"><code id="staffLink">' + esc(staffLink(ev)) + '</code>' +
       '<button class="btn btn-ghost" id="copyLink">Copy</button></div></div>';
+  }
+
+  function staffHtml(staff) {
+    if (!staff.length) {
+      return '<div class="card card-pad muted">No staff yet. Add each employee in the <b>Staff</b> tab of the event\'s Google Sheet, with their hourly rate and commission tiers.</div>';
+    }
+    return '<div class="card table-wrap"><table class="tbl"><thead><tr><th>Name</th><th class="num">Hourly rate</th>' +
+      '<th class="num">Commission under threshold</th><th class="num">Threshold</th><th class="num">Commission at/over</th><th>Status</th></tr></thead><tbody>' +
+      staff.map(function (p) {
+        return '<tr><td><b>' + esc(p.name) + '</b></td><td class="num">' + money(p.hourlyRate) + '/h</td>' +
+          '<td class="num">' + money(p.commissionUnder) + '</td><td class="num">' + money(p.threshold) + '</td>' +
+          '<td class="num">' + money(p.commissionOver) + '</td><td>' + (p.active ? '<span class="pill pill-live">Active</span>' : '<span class="pill pill-closed">Inactive</span>') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  /* ---------------- inventory */
+  function viewInventory(body, ev) {
+    if (!state.inv || state.inv.id !== ev.id) {
+      body.innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading stock…</div></div>';
+      api('getInventory', { id: ev.id }).then(function (res) {
+        state.inv = { id: ev.id, data: res.inventory };
+        if (document.getElementById('tabBody') === body) viewInventory(body, ev);
+      }).catch(function (err) {
+        body.innerHTML = '<div class="card empty"><h2>Couldn\'t load stock</h2><p class="muted">' + esc(err.message) + '</p>' +
+          '<button class="btn btn-primary" id="invRetry">Try again</button></div>';
+        document.getElementById('invRetry').onclick = function () { viewInventory(body, ev); };
+      });
+      return;
+    }
+    var data = state.inv.data;
+    var items = data.items;
+    if (!items.length) {
+      body.innerHTML = warningsHtml(data.warnings) +
+        '<div class="card empty"><h2>No products yet</h2>' +
+        '<p class="muted">In the event\'s Google Sheet, open the <b>Products</b> tab. Pick or paste product names in the <b>Product</b> column, ' +
+        'then type the <b>Opening Qty</b> and <b>Demo Qty</b>. Ref Code, category and price fill in by themselves.</p>' +
+        '<p class="muted">Partner products go in the <b>Consignment</b> tab.</p>' +
+        '<a class="btn btn-primary" href="' + esc(ev.sheetUrl) + '" target="_blank" rel="noopener">Open Google Sheet</a> ' +
+        '<button class="btn btn-ghost" id="invRefresh">Refresh</button></div>';
+      document.getElementById('invRefresh').onclick = function () { state.inv = null; viewInventory(body, ev); };
+      return;
+    }
+    var cats = [];
+    items.forEach(function (i) { if (cats.indexOf(i.category) < 0) cats.push(i.category); });
+    cats.sort();
+    var sum = function (f) { return items.reduce(function (a, i) { return a + f(i); }, 0); };
+    var stats = [
+      ['Products', num(items.length)],
+      ['Opening units', num(sum(function (i) { return i.opening; }))],
+      ['Refills / returns', signed(sum(function (i) { return i.moves; }))],
+      ['Sold', num(sum(function (i) { return i.sold; }))],
+      ['In stock', num(sum(function (i) { return i.live; }))],
+      ['Demo units', num(sum(function (i) { return i.demo; }))]
+    ];
+    body.innerHTML =
+      '<div class="stats">' + stats.map(function (s) {
+        return '<div class="card stat"><div class="k">' + s[0] + '</div><div class="v">' + s[1] + '</div></div>';
+      }).join('') + '</div>' +
+      warningsHtml(data.warnings) +
+      '<div class="toolbar">' +
+      '<input class="input search" id="invSearch" type="search" placeholder="Search product or ref code" value="' + esc(state.invQuery) + '">' +
+      '<select class="input" id="invCat"><option value="">All categories</option>' +
+      cats.map(function (c) { return '<option' + (c === state.invCat ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') +
+      '</select>' +
+      '<button class="btn btn-ghost" id="invRefresh">Refresh</button></div>' +
+      '<div id="invList"></div>' +
+      '<p class="small muted">Live stock = opening + refills/returns − sold. Demo units are counted separately and never sold. ' +
+      'Edit quantities in the event\'s Google Sheet (Products, Consignment and Stock Moves tabs), then Refresh.</p>';
+    document.getElementById('invRefresh').onclick = function () { state.inv = null; viewInventory(body, ev); };
+    var search = document.getElementById('invSearch');
+    search.oninput = function () { state.invQuery = search.value; drawInvList(items); };
+    document.getElementById('invCat').onchange = function () { state.invCat = this.value; drawInvList(items); };
+    drawInvList(items);
+  }
+
+  function signed(n) { return n > 0 ? '+' + num(n) : num(n); }
+
+  function warningsHtml(w) {
+    if (!w || !w.length) return '';
+    return '<div class="warn-box"><b>' + w.length + (w.length === 1 ? ' thing to check' : ' things to check') + ' in the Google Sheet</b><ul>' +
+      w.slice(0, 12).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') +
+      (w.length > 12 ? '<li>…and ' + (w.length - 12) + ' more</li>' : '') + '</ul></div>';
+  }
+
+  function drawInvList(items) {
+    var q = state.invQuery.trim().toLowerCase();
+    var shown = items.filter(function (i) {
+      if (state.invCat && i.category !== state.invCat) return false;
+      return !q || i.name.toLowerCase().indexOf(q) >= 0 || String(i.ref).toLowerCase().indexOf(q) >= 0;
+    });
+    var el = document.getElementById('invList');
+    if (!shown.length) { el.innerHTML = '<div class="card empty"><p class="muted">No products match.</p></div>'; return; }
+    function liveCls(i) { return i.live < 0 ? 'neg' : i.live === 0 ? 'zero' : ''; }
+    function nameCell(i) {
+      return '<div class="pname">' + esc(i.name) + '</div><div class="pref">' + esc(i.ref) +
+        (i.consignment ? ' · <span class="tag">Consignment' + (i.partner ? ': ' + esc(i.partner) : '') + '</span>' : '') + '</div>';
+    }
+    el.innerHTML =
+      '<div class="card table-wrap inv-table"><table class="tbl"><thead><tr><th>Product</th><th>Category</th><th class="num">Price</th>' +
+      '<th class="num">Opening</th><th class="num">Refills / returns</th><th class="num">Sold</th><th class="num">In stock</th><th class="num">Demo</th></tr></thead><tbody>' +
+      shown.map(function (i) {
+        return '<tr><td>' + nameCell(i) + '</td><td>' + esc(i.category) + '</td><td class="num">' + money(i.price) + '</td>' +
+          '<td class="num">' + num(i.opening) + '</td><td class="num">' + (i.moves ? signed(i.moves) : '–') + '</td>' +
+          '<td class="num">' + num(i.sold) + '</td><td class="num live ' + liveCls(i) + '">' + num(i.live) + '</td>' +
+          '<td class="num">' + (i.demo ? num(i.demo) : '–') + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<div class="inv-cards">' + shown.map(function (i) {
+        return '<div class="card inv-card"><div class="inv-main">' + nameCell(i) +
+          '<div class="pmeta">' + money(i.price) + ' · ' + esc(i.category) + '</div>' +
+          '<div class="pmeta">Opening ' + num(i.opening) + (i.moves ? ' · Moves ' + signed(i.moves) : '') + ' · Sold ' + num(i.sold) +
+          (i.demo ? ' · Demo ' + num(i.demo) : '') + '</div></div>' +
+          '<div class="inv-live ' + liveCls(i) + '"><div class="n">' + num(i.live) + '</div><div class="l">in stock</div></div></div>';
+      }).join('') + '</div>';
   }
 
   function showError(err, withBack) {
