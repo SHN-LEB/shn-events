@@ -47,7 +47,7 @@ const EVENT_TYPES = ['Sales', 'Awareness'];
 /* Every tab of an event sheet. Settings is a key/value tab; the rest are tables. */
 /* Every tab of an event sheet. '' leaves an empty separator column between blocks.
    Settings: A-C event settings, E-J staff list, L-P this event's catalogue.
-   Listing:  A-G products from the catalogue, I-R consignment items, T all product names (hidden helper). */
+   Listing:  A-G products from the catalogue, I-R external products, T all product names (hidden helper). */
 const STAFF_COL = 5;      // Settings!E
 const CATALOG_COL = 12;   // Settings!L
 const CONS_COL = 9;       // Listing!I
@@ -58,7 +58,7 @@ const BLOCK_COLORS = [
   ['Settings', STAFF_COL, STAFF_COL + 5, '#c9daf8', '#eef4fd'],               // staff: blue
   ['Settings', CATALOG_COL, CATALOG_COL + 4, '#d9ead3', '#f1f8ee'],           // catalogue: green
   ['Listing', 1, 7, '#c9daf8', '#eef4fd'],                                    // products: blue
-  ['Listing', CONS_COL, CONS_COL + 9, '#fce5cd', '#fef5ec'],                  // consignment: orange
+  ['Listing', CONS_COL, CONS_COL + 9, '#fce5cd', '#fef5ec'],                  // external products: orange
   ['Stock Moves', 1, 5, '#d9ead3', '#f1f8ee']                                 // stock moves: green
 ];
 /* Columns filled by formulas: shown in grey italic so nobody types in them */
@@ -69,7 +69,7 @@ const EVENT_TABS = [
     'Staff Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/item)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/item)', 'Active (Y/N)', '',
     'Catalogue: Product', 'Ref Code', 'Price (USD)', 'Category', 'Game Family']],
   ['Listing', ['Ref Code', 'Category', 'Game Family', 'Price (USD)', 'Product', 'Opening Qty', 'Demo Qty', '',
-    'Consignment: Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL', '',
+    'External Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL', '',
     'All Products (auto)']],
   ['Stock Moves', ['Date', 'Ref Code', 'Product', 'Qty (+refill / -return)', 'Note']],
   ['Sales', ['Sale ID', 'Line', 'Date', 'Time', 'Seller', 'Ref Code', 'Product', 'Category', 'Qty', 'Unit Price (USD)', 'Discount %', 'Line Total (USD)', 'Payment Method', 'Online (USD)', 'Received USD', 'Received LBP', 'Change USD', 'Change LBP', 'Rounding (USD)', 'VAT (USD)', 'Void', 'Void Reason', 'Logged At']],
@@ -544,10 +544,10 @@ function getInventory_(id) {
       lstSheet.getRange(i + 1, CONS_COL + 1).setValue(ref);
     }
     const price = parseMoney_(r[K + 3]);
-    if (!price) warnings.push('Consignment row ' + (i + 1) + ': "' + name + '" has no price.');
-    add({ ref: ref, name: name, category: String(r[K + 2] || '') || 'Consignment', family: '', price: price,
+    if (!price) warnings.push('External products row ' + (i + 1) + ': "' + name + '" has no price.');
+    add({ ref: ref, name: name, category: String(r[K + 2] || '') || 'External', family: '', price: price,
       opening: qty(r[K + 4]), demo: qty(r[K + 5]), moves: 0, sold: 0, consignment: true,
-      partner: String(r[K + 6] || ''), payType: String(r[K + 7] || ''), payValue: qty(r[K + 8]), picture: String(r[K + 9] || '') }, 'Consignment');
+      partner: String(r[K + 6] || ''), payType: String(r[K + 7] || ''), payValue: qty(r[K + 8]), picture: String(r[K + 9] || '') }, 'External products');
   }
 
   const moves = ss.getSheetByName('Stock Moves').getDataRange().getValues();

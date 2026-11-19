@@ -15,13 +15,13 @@
     { id: 'pnl', label: 'P&L', phase: 5 }
   ];
   var TAB_HINT = {
-    inventory: 'Opening stock from the SHN Catalogue, demo units, refills and returns, consignment items and daily counts.',
+    inventory: 'Opening stock from the SHN Catalogue, demo units, refills and returns, external products and daily counts.',
     pos: 'Product list with pictures and search, seller buttons, discounts, USD/LBP payment and change, online and split payments.',
     cash: 'Drawer balance in USD and LBP, handovers and cash counts.',
     shifts: 'Clock in and out, hours and commissions per employee.',
     expenses: 'Rent, transport, bags, marketing and other event costs.',
     dashboard: 'Sales by day, category, game, seller and payment type, against daily targets.',
-    pnl: 'Sales, COGS, staff cost, expenses, consignment settlement and net profit.'
+    pnl: 'Sales, COGS, staff cost, expenses, external products settlement and net profit.'
   };
 
   var app = document.getElementById('app');
@@ -427,7 +427,7 @@
         '<div class="card empty"><h2>No products yet</h2>' +
         '<p class="muted">In the event\'s Google Sheet, open the <b>Listing</b> tab. Pick or paste product names in the <b>Product</b> column, ' +
         'then type the <b>Opening Qty</b> and <b>Demo Qty</b>. Ref Code, category and price fill in by themselves.</p>' +
-        '<p class="muted">Partner products go in the consignment columns (I–R) of the same tab.</p>' +
+        '<p class="muted">External products go in columns I–R of the same tab.</p>' +
         '<a class="btn btn-primary" href="' + esc(ev.sheetUrl) + '" target="_blank" rel="noopener">Open Google Sheet</a> ' +
         '<button class="btn btn-ghost" id="invRefresh">Refresh</button></div>';
       document.getElementById('invRefresh').onclick = function () { state.inv = null; viewInventory(body, ev); };
@@ -486,7 +486,7 @@
     function liveCls(i) { return i.live < 0 ? 'neg' : i.live === 0 ? 'zero' : ''; }
     function nameCell(i) {
       return '<div class="pname">' + esc(i.name) + '</div><div class="pref">' + esc(i.ref) +
-        (i.consignment ? ' · <span class="tag">Consignment' + (i.partner ? ': ' + esc(i.partner) : '') + '</span>' : '') + '</div>';
+        '</div>';
     }
     el.innerHTML =
       '<div class="card table-wrap inv-table"><table class="tbl"><thead><tr><th>Product</th><th>Category</th><th class="num">Price</th>' +
