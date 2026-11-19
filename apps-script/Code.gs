@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -52,6 +52,18 @@ const STAFF_COL = 5;      // Settings!E
 const CATALOG_COL = 12;   // Settings!L
 const CONS_COL = 9;       // Listing!I
 const ALL_NAMES_COL = 20; // Listing!T
+/* Colour per column group: [tab, first col, last col, header colour, body colour] */
+const BLOCK_COLORS = [
+  ['Settings', 1, 3, '#d9d9d9', '#f3f3f3'],                                   // event settings: grey
+  ['Settings', STAFF_COL, STAFF_COL + 5, '#c9daf8', '#eef4fd'],               // staff: blue
+  ['Settings', CATALOG_COL, CATALOG_COL + 4, '#d9ead3', '#f1f8ee'],           // catalogue: green
+  ['Listing', 1, 7, '#c9daf8', '#eef4fd'],                                    // products: blue
+  ['Listing', CONS_COL, CONS_COL + 9, '#fce5cd', '#fef5ec'],                  // consignment: orange
+  ['Stock Moves', 1, 5, '#d9ead3', '#f1f8ee']                                 // stock moves: green
+];
+/* Columns filled by formulas: shown in grey italic so nobody types in them */
+const AUTO_COLS = [['Listing', 1, 4], ['Stock Moves', 2, 2]];
+
 const EVENT_TABS = [
   ['Settings', ['Setting', 'Value', 'Notes', '',
     'Staff Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/item)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/item)', 'Active (Y/N)', '',
@@ -412,7 +424,6 @@ function colLetter_(n) {
 }
 
 function buildInventoryTabs_(ss, catalogue) {
-  const grey = '#f1f3f6';
   const red = '#f8d7d4';
   const strict = function (range) {
     return SpreadsheetApp.newDataValidation().requireValueInRange(range, true).setAllowInvalid(false).build();
@@ -444,7 +455,6 @@ function buildInventoryTabs_(ss, catalogue) {
   lst.getRange(1, 2).setFormula(look('Category', 4));
   lst.getRange(1, 3).setFormula(look('Game Family', 5));
   lst.getRange(1, 4).setFormula(look('Price (USD)', 3));
-  lst.getRange(2, 1, MAX_ROWS, 4).setBackground(grey);
   lst.getRange(2, 4, MAX_ROWS, 1).setNumberFormat('$#,##0.00');
   lst.getRange(2, 5, MAX_ROWS, 1).setDataValidation(strict(set.getRange(C + '2:' + C)));
   lst.setColumnWidth(5, 320);
@@ -459,10 +469,20 @@ function buildInventoryTabs_(ss, catalogue) {
   // Stock Moves: dropdown of this event's products (listing + consignment)
   const moves = ss.getSheetByName('Stock Moves');
   moves.getRange(1, 2).setFormula('={"Ref Code";ARRAYFORMULA(IF(C2:C="","",IFERROR(VLOOKUP(C2:C,{Listing!E2:E,Listing!A2:A},2,FALSE),IFERROR(VLOOKUP(C2:C,{Listing!I2:I,Listing!J2:J},2,FALSE),""))))}');
-  moves.getRange(2, 2, MAX_ROWS, 1).setBackground(grey);
   moves.getRange(2, 1, MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');
   moves.getRange(2, 3, MAX_ROWS, 1).setDataValidation(strict(lst.getRange('T2:T')));
   moves.setColumnWidth(3, 320);
+
+  // colour the column groups, then mark the automatic columns
+  BLOCK_COLORS.forEach(function (b) {
+    const sh = ss.getSheetByName(b[0]);
+    const n = b[2] - b[1] + 1;
+    sh.getRange(1, b[1], 1, n).setBackground(b[3]);
+    sh.getRange(2, b[1], MAX_ROWS, n).setBackground(b[4]);
+  });
+  AUTO_COLS.forEach(function (a) {
+    ss.getSheetByName(a[0]).getRange(2, a[1], MAX_ROWS, a[2] - a[1] + 1).setFontColor('#6b6b6b').setFontStyle('italic');
+  });
 
   // safety net: a name that no longer matches (catalogue edited) turns red
   lst.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
