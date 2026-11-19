@@ -9,7 +9,11 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
+
+/* Drive folder that holds the master sheet and every event sheet.
+   Leave empty to have setup() create a "SHN Events" folder in My Drive. */
+const EVENTS_FOLDER_ID = '';
 const TOKEN_HOURS = 12;
 
 const MASTER_TABS = {
@@ -50,6 +54,10 @@ function setup() {
   const props = PropertiesService.getScriptProperties();
 
   let folder = null;
+  if (EVENTS_FOLDER_ID && props.getProperty('FOLDER_ID') !== EVENTS_FOLDER_ID) {
+    folder = DriveApp.getFolderById(EVENTS_FOLDER_ID); // fails clearly if the account can't open it
+    props.setProperty('FOLDER_ID', EVENTS_FOLDER_ID);
+  }
   const folderId = props.getProperty('FOLDER_ID');
   if (folderId) { try { folder = DriveApp.getFolderById(folderId); } catch (e) { folder = null; } }
   if (!folder) {
