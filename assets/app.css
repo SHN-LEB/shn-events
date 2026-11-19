@@ -1,13 +1,13 @@
 :root {
-  --navy: #14213d;
-  --navy-2: #1f3160;
-  --accent: #fca311;
+  --navy: #231f20;
+  --navy-2: #3b3536;
+  --accent: #eb5c24;
   --accent-ink: #7a4a00;
-  --bg: #f4f6fa;
+  --bg: #f7f4ef;
   --card: #ffffff;
   --ink: #18202e;
   --muted: #5b6577;
-  --line: #e1e5ee;
+  --line: #e7e1d8;
   --good: #1a7f4b;
   --good-bg: #e3f5eb;
   --warn: #9a5b00;
@@ -17,7 +17,7 @@
   --info: #1f4fb8;
   --info-bg: #e6eeff;
   --radius: 12px;
-  --shadow: 0 1px 2px rgba(20, 33, 61, .06), 0 4px 14px rgba(20, 33, 61, .06);
+  --shadow: 0 1px 2px rgba(35, 31, 32, .06), 0 4px 14px rgba(35, 31, 32, .06);
 }
 
 * { box-sizing: border-box; }
@@ -37,17 +37,16 @@ button, input, select { font: inherit; color: inherit; }
 .topbar {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; justify-content: space-between;
-  height: 56px; padding: 0 16px;
+  height: 60px; padding: 0 16px;
   padding-left: max(16px, env(safe-area-inset-left));
   padding-right: max(16px, env(safe-area-inset-right));
   background: var(--navy); color: #fff;
 }
 .brand { display: flex; align-items: center; gap: 10px; color: #fff; text-decoration: none; }
-.brand-mark {
-  background: var(--accent); color: var(--navy); font-weight: 800; letter-spacing: .5px;
-  border-radius: 8px; padding: 3px 8px; font-size: 14px;
-}
-.brand-name { font-weight: 600; font-size: 17px; }
+.brand-logo { height: 38px; width: auto; display: block; }
+.brand-sep { width: 1px; height: 26px; background: rgba(249, 242, 232, .35); }
+.brand-name { font-weight: 600; font-size: 16px; color: #f9f2e8; letter-spacing: .2px; }
+.login-logo { display: block; height: 44px; width: auto; margin: 0 0 18px; }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 .topbar .link-btn { color: #dfe5f2; }
 
@@ -66,7 +65,8 @@ button, input, select { font: inherit; color: inherit; }
 }
 .btn-primary { background: var(--navy); color: #fff; }
 .btn-primary:hover { background: var(--navy-2); }
-.btn-accent { background: var(--accent); color: var(--navy); }
+.btn-accent { background: var(--accent); color: #fff; }
+.btn-accent:hover { background: #d44f1b; }
 .btn-ghost { background: #fff; border-color: var(--line); color: var(--ink); }
 .btn-ghost:hover { border-color: #c8cfdd; }
 .btn-danger { background: #fff; border-color: #f2c4bf; color: var(--bad); }
@@ -91,7 +91,7 @@ button, input, select { font: inherit; color: inherit; }
   width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 10px;
   border: 1px solid #cdd4e1; background: #fff; font-size: 16px;
 }
-.input:focus { outline: 2px solid rgba(252, 163, 17, .45); border-color: var(--accent); }
+.input:focus { outline: 2px solid rgba(235, 92, 36, .35); border-color: var(--accent); }
 .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-error { color: var(--bad); background: var(--bad-bg); border-radius: 8px; padding: 8px 10px; font-size: 14px; margin-bottom: 12px; }
 
@@ -107,7 +107,7 @@ button, input, select { font: inherit; color: inherit; }
 /* events grid */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .event-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; text-decoration: none; color: inherit; transition: transform .08s ease, box-shadow .12s ease; }
-.event-card:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(20,33,61,.08), 0 10px 24px rgba(20,33,61,.10); }
+.event-card:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(35,31,32,.08), 0 10px 24px rgba(35,31,32,.10); }
 .event-card h3 { margin: 0; font-size: 17px; line-height: 1.3; }
 .event-meta { display: grid; gap: 4px; font-size: 14px; color: var(--muted); }
 .event-card-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
@@ -132,7 +132,7 @@ button, input, select { font: inherit; color: inherit; }
 .tabs {
   display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
   border-bottom: 1px solid var(--line); margin: 0 -16px 18px; padding: 0 16px;
-  position: sticky; top: 56px; background: var(--bg); z-index: 10;
+  position: sticky; top: 60px; background: var(--bg); z-index: 10;
 }
 .tabs::-webkit-scrollbar { display: none; }
 .tab {
@@ -209,6 +209,8 @@ button, input, select { font: inherit; color: inherit; }
 
 /* phones */
 @media (max-width: 600px) {
+  .brand-logo { height: 32px; }
+  .brand-name { font-size: 15px; }
   .app { padding: 16px 12px 40px; }
   .tabs { margin: 0 -12px 16px; padding: 0 12px; }
   .page-head h1, .event-head h1 { font-size: 21px; }

@@ -142,8 +142,9 @@
   function viewLogin() {
     app.innerHTML =
       '<div class="login-wrap"><form class="card login-card" id="loginForm" autocomplete="on">' +
+      '<img class="login-logo" src="assets/logo-dark.png" alt="Superheated Neurons">' +
       '<h1>Management sign in</h1>' +
-      '<p class="muted">Create and manage SHN events.</p>' +
+      '<p class="muted">SHN LEB Events: create and manage events.</p>' +
       '<div id="loginError"></div>' +
       '<div class="field"><label for="pw">Password</label>' +
       '<input class="input" id="pw" type="password" autocomplete="current-password" required autofocus></div>' +
