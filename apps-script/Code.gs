@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.2.2';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -482,6 +482,21 @@ function buildInventoryTabs_(ss, catalogue) {
   });
   AUTO_COLS.forEach(function (a) {
     ss.getSheetByName(a[0]).getRange(2, a[1], MAX_ROWS, a[2] - a[1] + 1).setFontColor('#6b6b6b').setFontStyle('italic');
+  });
+
+  // warn before anyone edits formulas, headers or the event ID (edits stay possible after confirming)
+  const warn = function (range, why) { range.protect().setDescription(why).setWarningOnly(true); };
+  AUTO_COLS.forEach(function (a) {
+    warn(ss.getSheetByName(a[0]).getRange(1, a[1], MAX_ROWS + 1, a[2] - a[1] + 1), 'Filled automatically from the product name');
+  });
+  warn(lst.getRange(1, ALL_NAMES_COL, MAX_ROWS + 1, 1), 'Automatic list for the Stock Moves dropdown');
+  ['Settings', 'Listing', 'Stock Moves', 'Sales', 'Shifts', 'Cash', 'Counts', 'Expenses', 'P&L', 'Sales Tracker'].forEach(function (t) {
+    const sh = ss.getSheetByName(t);
+    warn(sh.getRange(1, 1, 1, sh.getMaxColumns()), 'Column headers used by the app');
+  });
+  warn(set.getRange(2, 1, 1, 3), 'Event ID: do not change');
+  ['Sales', 'Shifts', 'Cash', 'Counts'].forEach(function (t) {
+    warn(ss.getSheetByName(t).getRange(2, 1, MAX_ROWS, ss.getSheetByName(t).getMaxColumns()), 'Written by the app');
   });
 
   // safety net: a name that no longer matches (catalogue edited) turns red
