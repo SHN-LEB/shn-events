@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -24,7 +24,7 @@ const MASTER_TABS = {
 const MASTER_SETTINGS = [
   ['ADMIN_PASSWORD', 'change-me', 'Password for management. Change it now.'],
   ['CATALOG_SHEET_ID', '1BYe78W9HkYqhN19iT2iyyKyKnBdjnNSSi29zfg62aO0', 'SHN Catalogue (read only)'],
-  ['COGS_PCT', 35, 'COGS as % of selling price, used in every P&L'],
+  ['COGS_PCT', 35, 'COGS as % of selling price. Copied into each new event and locked there'],
   ['DEFAULT_FX_RATE', 89500, 'LBP per USD, copied into each new event'],
   ['DEFAULT_MAX_DISCOUNT_PCT', 20, 'Highest discount % a cashier can enter, copied into each new event'],
   ['DEFAULT_OPENING_CASH_USD', 0, 'Copied into each new event'],
@@ -290,6 +290,7 @@ function buildEventSheet_(ss, ev) {
     ['Opening Cash USD', Number(masterSetting_('DEFAULT_OPENING_CASH_USD')) || 0, 'Cash in the drawer at the start'],
     ['Opening Cash LBP', Number(masterSetting_('DEFAULT_OPENING_CASH_LBP')) || 0, 'Cash in the drawer at the start'],
     ['Max Discount %', Number(masterSetting_('DEFAULT_MAX_DISCOUNT_PCT')) || 0, 'Highest discount a cashier can enter'],
+    ['COGS %', Number(masterSetting_('COGS_PCT')) || 0, 'Cost of goods as % of selling price, locked for this event'],
     ['PIN', pin, '4 digits, shared with the event staff'],
     ['Daily Target Qty', '', 'Optional'],
     ['Daily Target Sales (USD)', '', 'Optional']
@@ -320,6 +321,7 @@ function getEvent_(id) {
     openingCashUsd: Number(s['Opening Cash USD']) || 0,
     openingCashLbp: Number(s['Opening Cash LBP']) || 0,
     maxDiscountPct: Number(s['Max Discount %']) || 0,
+    cogsPct: Number(s['COGS %']) || 0,
     pin: String(s['PIN'] || ''),
     dailyTargetQty: s['Daily Target Qty'] === '' ? null : Number(s['Daily Target Qty']),
     dailyTargetSales: s['Daily Target Sales (USD)'] === '' ? null : Number(s['Daily Target Sales (USD)'])
