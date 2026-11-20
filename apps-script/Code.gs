@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -175,6 +175,7 @@ function route_(req) {
     case 'setEventStatus': requireAdmin_(req); return { event: setEventStatus_(req.id, req.status) };
     case 'eventPublic': return { event: eventPublic_(req.eventId) };
     case 'staffLogin': return staffLogin_(req);
+    case 'posCatalog': return { catalog: posCatalog_(req.eventId) };
     case 'posData': requireEventAccess_(req, req.eventId); return { pos: posData_(req.eventId, isAdmin_(req)) };
     case 'recordSale': requireEventAccess_(req, req.eventId); return { sale: recordSale_(req.eventId, req.sale) };
     case 'clock': requireEventAccess_(req, req.eventId); return { openShifts: clock_(req.eventId, req.name, req.direction, req.clientTime) };
@@ -693,6 +694,18 @@ function staffLogin_(req) {
   }
   const exp = Date.now() + STAFF_TOKEN_HOURS * 3600 * 1000;
   return { token: signToken_('staff:' + id, exp), expires: exp, event: eventPublic_(id) };
+}
+
+/* Product names, prices and pictures, shown while staff type the PIN (no stock, no sales). */
+function posCatalog_(id) {
+  const ev = eventPublic_(id);
+  if (ev.status === 'Closed') throw userError_('This event is closed.', 'closed');
+  let pics = {};
+  try { pics = pictures_(); } catch (e) { pics = {}; }
+  const products = getInventory_(id).items.map(function (it) {
+    return { ref: it.ref, name: it.name, category: it.category, price: it.price, picture: it.picture || pics[it.ref] || '' };
+  }).sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
+  return { event: ev, products: products };
 }
 
 function openEventForWrite_(id) {
