@@ -415,3 +415,27 @@ body.pos-checkout .pos-cartbar { display: none !important; }
 .topbar-right { min-width: 0; flex-shrink: 1; }
 .brand { flex-shrink: 0; }
 @media (max-width: 600px) { .topbar-event { max-width: 38vw; margin-left: 0; } }
+
+/* ================================================================ POS round 3 */
+.tile { display: flex; flex-direction: column; }
+.tile-name { -webkit-line-clamp: unset; display: block; overflow: visible; min-height: 0; flex: 1 1 auto; word-break: break-word; }
+.tile-bottom { display: flex; flex-direction: column; gap: 4px; margin-top: auto; }
+.tile-act { display: block; }
+.disc-note { display: grid; grid-template-columns: 76px 1fr; gap: 8px; margin-top: 10px; }
+.disc-note .field { margin-bottom: 4px; }
+.disc-note #coDisc { text-align: center; }
+.field.off label, .cashf-hint.off { color: #b9ad9c; }
+.notes { grid-template-columns: repeat(7, 1fr); }
+.seg.seg2 { grid-template-columns: 1fr 1fr; }
+.err-box { background: var(--bad-bg); color: #7a1c14; border: 1px solid #f2c4bf; border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; font-size: 14px; }
+.err-details { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: #8a6d68; margin: 6px 0 8px; word-break: break-word; }
+.card.empty .err-details { margin: 0 auto 14px; max-width: 520px; }
+.tag-ret { color: var(--warn); font-weight: 700; margin-top: 4px; }
+.sale-row.is-return .sr-main b { color: var(--bad); }
+.qty button[disabled] { opacity: .35; }
+@media (max-width: 600px) {
+  .tile-name { font-size: 11.5px; line-height: 1.25; }
+  .notes { gap: 3px; }
+  .note { font-size: 13px; padding: 0; }
+}
+[hidden] { display: none !important; }

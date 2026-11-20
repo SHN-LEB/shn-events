@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.4.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -76,7 +76,7 @@ const EVENT_TABS = [
     'External Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL', '',
     'All Products (auto)']],
   ['Stock Moves', ['Date', 'Ref Code', 'Product', 'Qty (+refill / -return)', 'Note']],
-  ['Sales', ['Sale ID', 'Line', 'Date', 'Time', 'Seller', 'Ref Code', 'Product', 'Category', 'Qty', 'Unit Price (USD)', 'Discount %', 'Line Total (USD)', 'Payment Method', 'Online (USD)', 'Received USD', 'Received LBP', 'Change USD', 'Change LBP', 'Rounding (USD)', 'VAT (USD)', 'Void', 'Void Reason', 'Logged At', 'Note']],
+  ['Sales', ['Sale ID', 'Line', 'Date', 'Time', 'Seller', 'Ref Code', 'Product', 'Category', 'Qty', 'Unit Price (USD)', 'Discount %', 'Line Total (USD)', 'Payment Method', 'Online (USD)', 'Received USD', 'Received LBP', 'Change USD', 'Change LBP', 'Rounding (USD)', 'VAT (USD)', 'Void', 'Void Reason', 'Logged At', 'Note', 'Return Of']],
   ['Shifts', ['Date', 'Employee', 'Clock In', 'Clock Out', 'Hours', 'Note']],
   ['Cash', ['Date Time', 'Kind (Handover/Count)', 'USD', 'LBP', 'From', 'To', 'Note']],
   ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Kind (Sellable/Demo)', 'Expected', 'Counted', 'Difference', 'Counted By']],
@@ -156,11 +156,13 @@ function doPost(e) {
     return json_({ ok: false, error: 'Bad request.' });
   }
   try {
-    return json_(Object.assign({ ok: true }, route_(req)));
+    return json_(Object.assign({ ok: true, version: APP_VERSION }, route_(req)));
   } catch (err) {
-    const msg = (err && err.userMessage) || 'Something went wrong. Please try again.';
-    if (!(err && err.userMessage)) console.error(err && err.stack || err);
-    return json_({ ok: false, error: msg, code: (err && err.code) || 'error' });
+    if (err && err.userMessage) return json_({ ok: false, error: err.userMessage, code: err.code || 'error', version: APP_VERSION });
+    const detail = String((err && err.message) || err);
+    console.error(err && err.stack || err);
+    try { logError_({ eventId: req.eventId || req.id || '', where: 'server: ' + req.action, message: detail, details: String(err && err.stack || '').slice(0, 1500) }); } catch (e2) { /* never fail twice */ }
+    return json_({ ok: false, error: 'Something went wrong on the server.', detail: detail, code: 'server', version: APP_VERSION });
   }
 }
 
@@ -180,6 +182,8 @@ function route_(req) {
     case 'recordSale': requireEventAccess_(req, req.eventId); return { sale: recordSale_(req.eventId, req.sale) };
     case 'clock': requireEventAccess_(req, req.eventId); return { openShifts: clock_(req.eventId, req.name, req.direction, req.clientTime) };
     case 'voidSale': requireAdmin_(req); return { sale: voidSale_(req.eventId, req.saleId, req.reason) };
+    case 'recordReturn': requireEventAccess_(req, req.eventId); return { sale: recordReturn_(req.eventId, req.ret) };
+    case 'logError': logError_(req.error || {}); return {};
     default: throw userError_('Unknown action.', 'bad_action');
   }
 }
@@ -799,7 +803,8 @@ function saleSummaries_(rows, limit) {
     if (!id) continue;
     if (!by[id]) {
       by[id] = { id: id, date: dateStr_(r[2]), time: timeStr_(r[3]), seller: String(r[4] || ''), method: String(r[12] || ''),
-        total: 0, units: 0, lines: [], void: !!String(r[20] || '').trim(), voidReason: String(r[21] || '') };
+        total: 0, units: 0, lines: [], void: !!String(r[20] || '').trim(), voidReason: String(r[21] || ''),
+        returnOf: String(r[24] || ''), returned: {} };
       order.push(id);
     }
     const s = by[id];
@@ -811,6 +816,14 @@ function saleSummaries_(rows, limit) {
       s.changeUsd = Number(r[16]) || 0; s.changeLbp = Number(r[17]) || 0; s.discountPct = Number(r[10]) || 0;
     }
   }
+  // how much of each sale has been returned
+  order.forEach(function (id) {
+    const ret = by[id];
+    if (!ret.returnOf || ret.void || !by[ret.returnOf]) return;
+    ret.lines.forEach(function (l) {
+      by[ret.returnOf].returned[l.ref] = (by[ret.returnOf].returned[l.ref] || 0) - l.qty;
+    });
+  });
   return order.slice(-limit).reverse().map(function (id) { return by[id]; });
 }
 
@@ -935,6 +948,97 @@ function recordSale_(id, sale) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* A return: the customer brings items back. Stored as negative lines linked to the original sale,
+   so stock goes back up and the cash handed back leaves the drawer. Safe to send twice. */
+function recordReturn_(id, ret) {
+  ret = ret || {};
+  const retId = String(ret.id || '');
+  if (!/^[A-Za-z0-9-]{6,40}$/.test(retId)) throw userError_('Bad return number.', 'invalid');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const sh = ss.getSheetByName('Sales');
+    const rows = sh.getDataRange().getValues();
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === retId) {
+        return saleSummaries_(rows.filter(function (r, j) { return j === 0 || String(r[0]) === retId; }), 1)[0];
+      }
+    }
+    const saleId = String(ret.saleId || '');
+    const orig = rows.filter(function (r, j) { return j > 0 && String(r[0]) === saleId; });
+    if (!orig.length) throw userError_('The original sale was not found.', 'not_found');
+    if (String(orig[0][24] || '').trim()) throw userError_('A return cannot be returned.', 'invalid');
+    if (String(orig[0][20] || '').trim()) throw userError_('This sale was cancelled.', 'invalid');
+    const summary = saleSummaries_([rows[0]].concat(rows.slice(1).filter(function (r) {
+      return String(r[0]) === saleId || String(r[24]) === saleId;
+    })), 1000).filter(function (x) { return x.id === saleId; })[0];
+
+    const fx = Number(readEventSettings_(ev.sheetId)['Exchange Rate (LBP per USD)']) || 0;
+    const lines = [];
+    (ret.lines || []).forEach(function (l) {
+      const ref = String(l.ref || '');
+      const q = Math.round(Number(l.qty));
+      if (!q) return;
+      const o = orig.filter(function (r) { return String(r[5]) === ref; })[0];
+      if (!o) throw userError_('An item in this return was not in the original sale.', 'invalid');
+      const left = (Number(o[8]) || 0) - (summary.returned[ref] || 0);
+      if (!(q >= 1 && q <= left)) throw userError_('You can return at most ' + left + ' of "' + o[6] + '".', 'invalid');
+      lines.push({ o: o, qty: q, total: round2_((Number(o[11]) || 0) / (Number(o[8]) || 1) * q) });
+    });
+    if (!lines.length) throw userError_('Pick the items being returned.', 'invalid');
+    const due = round2_(lines.reduce(function (a, l) { return a + l.total; }, 0));
+
+    const method = ret.method === 'Online' ? 'Online' : 'Cash';
+    let refundUsd = 0, refundLbp = 0, rounding = 0;
+    if (method === 'Cash') {
+      if (!fx) throw userError_('Set the exchange rate in the event Settings tab first.', 'invalid');
+      refundUsd = Math.max(0, Number(ret.refundUsd) || 0);
+      refundLbp = Math.max(0, Math.round(Number(ret.refundLbp) || 0));
+      rounding = round2_(due - refundUsd - refundLbp / fx);
+      if (Math.abs(rounding) > 1 + LBP_STEP / fx + 0.005) throw userError_('The refund given does not match the amount due.', 'invalid');
+    }
+    const t = when_(ret.clientTime);
+    const date = Utilities.formatDate(t, tz_(), 'yyyy-MM-dd');
+    const time = Utilities.formatDate(t, tz_(), 'HH:mm');
+    const loggedAt = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm:ss');
+    const out = lines.map(function (l, i) {
+      const o = l.o, first = i === 0;
+      return [retId, i + 1, date, time, String(o[4]), String(o[5]), String(o[6]), String(o[7]), -l.qty, Number(o[9]) || 0, Number(o[10]) || 0, -l.total,
+        method, first ? (method === 'Online' ? -due : 0) : '', first ? 0 : '', first ? 0 : '', first ? refundUsd : '', first ? refundLbp : '',
+        first ? rounding : '', round2_(-l.total * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt, first ? String(ret.note || '').slice(0, 200) : '', saleId];
+    });
+    const start = sh.getLastRow() + 1;
+    sh.getRange(start, 1, out.length, 3).setNumberFormat('@');
+    sh.getRange(start, 4, out.length, 1).setNumberFormat('@');
+    sh.getRange(start, 6, out.length, 1).setNumberFormat('@');
+    sh.getRange(start, 25, out.length, 1).setNumberFormat('@');
+    sh.getRange(start, 1, out.length, out[0].length).setValues(out);
+    return saleSummaries_([rows[0]].concat(out), 1)[0];
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* Errors from phones, laptops and the server land in the master sheet's Errors tab. */
+function logError_(e) {
+  const cache = CacheService.getScriptCache();
+  const key = 'errlog_' + Utilities.formatDate(new Date(), tz_(), 'yyyyMMddHH');
+  const n = Number(cache.get(key) || 0);
+  if (n >= 200) return; // flood guard
+  cache.put(key, String(n + 1), 3600);
+  const ss = master_();
+  let sh = ss.getSheetByName('Errors');
+  if (!sh) {
+    sh = ss.insertSheet('Errors');
+    writeHeader_(sh, ['Time', 'Event ID', 'Where', 'Device', 'App Version', 'Message', 'Details']);
+  }
+  const clip = function (v, n2) { return String(v == null ? '' : v).slice(0, n2); };
+  sh.appendRow([Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm:ss'), clip(e.eventId, 40), clip(e.where, 120),
+    clip(e.device, 200), clip(e.version || APP_VERSION, 20), clip(e.message, 500), clip(e.details, 2000)]);
 }
 
 function clock_(id, name, direction, clientTime) {

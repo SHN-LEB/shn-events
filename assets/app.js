@@ -2,6 +2,7 @@
 (function () {
   'use strict';
 
+  var APP_VERSION = '1.4.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var TABS = [
@@ -66,6 +67,7 @@
           if (res.code === 'auth' && !opts.token && !opts.quiet) { setToken(null); go('#/login'); }
           var err = new Error(res.error || 'Something went wrong.');
           err.code = res.code;
+          if (res.detail) err.detail = res.detail;
           throw err;
         }
         return res;
@@ -511,9 +513,32 @@
       }).join('') + '</div>';
   }
 
+  /* every unexpected error is copied to the master sheet's Errors tab */
+  var reported = 0;
+  function reportError(err, ctx) {
+    if (!API_URL || reported >= 20 || (err && (err.code === 'auth' || err.code === 'invalid' || err.code === 'bad_pin'))) return;
+    reported++;
+    ctx = ctx || {};
+    var e = {
+      eventId: ctx.eventId || new URLSearchParams(location.search).get('e') || '',
+      where: ctx.where || location.hash || 'app',
+      device: navigator.userAgent.slice(0, 200),
+      version: APP_VERSION,
+      message: String((err && err.message) || err).slice(0, 500),
+      details: String((err && (err.detail || err.stack)) || '').slice(0, 1500)
+    };
+    try {
+      fetch(API_URL, { method: 'POST', body: JSON.stringify({ action: 'logError', error: e }) }).catch(function () {});
+    } catch (x) { /* never fail while reporting */ }
+  }
+  window.addEventListener('error', function (ev) { reportError(ev.error || ev.message, { where: 'page error' }); });
+  window.addEventListener('unhandledrejection', function (ev) { reportError(ev.reason, { where: 'promise' }); });
+
   function showError(err, withBack) {
     if (err && err.code === 'auth') return;
+    if (!err.offline) reportError(err, { where: 'admin ' + location.hash });
     app.innerHTML = '<div class="card empty"><h2>Couldn\'t load</h2><p class="muted">' + esc(err.message) + '</p>' +
+      '<div class="err-details">Details: ' + esc(String(err.detail || err.message).slice(0, 300)) + ' · v' + APP_VERSION + ' · ' + new Date().toTimeString().slice(0, 8) + '</div>' +
       '<button class="btn btn-primary" id="retry">Try again</button>' +
       (withBack ? ' <a class="btn btn-ghost" href="#/">All events</a>' : '') + '</div>';
     document.getElementById('retry').onclick = render;
@@ -540,6 +565,7 @@
 
   window.SHN = {
     api: api, esc: esc, num: num, money: money, toast: toast, fmtRange: fmtRange, phase: phase,
+    version: APP_VERSION, reportError: reportError,
     app: app, topbarRight: topbarRight, isAdmin: function () { return !!getToken(); }
   };
 
