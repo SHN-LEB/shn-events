@@ -18,6 +18,10 @@ Event sales portal for Superheated Neurons: events home, per-event POS, inventor
 6. **Deploy → New deployment →** type **Web app**, Execute as **Me**, Who has access **Anyone** → Deploy.
    Copy the web app URL (ends with `/exec`) and paste it into `config.js` as `API_URL`.
 
+## Staff POS link
+
+Each event's staff link is `https://shn-leb.github.io/shn-events/?e=<event id>` (shown in the event's Settings tab in the app). Staff enter the event PIN.
+
 ## Updating the back office
 
 Paste the new `Code.gs`, save, then **Deploy → Manage deployments →** pencil → Version **New version** → Deploy.

@@ -9,12 +9,15 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.2.2';
+const APP_VERSION = '1.3.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
 const EVENTS_FOLDER_ID = '1JkQzc0GkBpx6OvErqHcBe2VYljxhtjxh';
 const TOKEN_HOURS = 12;
+const STAFF_TOKEN_HOURS = 16;
+const VAT_PCT = 11;   // prices include VAT; the VAT column is for reporting only
+const LBP_STEP = 5000; // LBP change is rounded to this step
 
 const MASTER_TABS = {
   Events: ['Event ID', 'Name', 'Type', 'Venue', 'Start Date', 'End Date', 'Status', 'Sheet URL', 'Sheet ID', 'Created At'],
@@ -29,6 +32,7 @@ const MASTER_SETTINGS = [
   ['DEFAULT_MAX_DISCOUNT_PCT', 20, 'Highest discount % a cashier can enter, copied into each new event'],
   ['DEFAULT_OPENING_CASH_USD', 0, 'Copied into each new event'],
   ['DEFAULT_OPENING_CASH_LBP', 0, 'Copied into each new event'],
+  ['SHOP_DOMAIN', 'superheatedneurons.com', 'Website the POS takes product pictures from (matched by SKU = Ref Code)'],
   ['EVENT_EXCLUDED_PRODUCT_LINES', 'Accessories, (Blank), CTT, Display Stands, Events, Giant Games, Merchandizing, Ops, Rebates', 'Catalogue product lines left out of event catalogues. Comma separated; (Blank) = no product line']
 ];
 
@@ -72,7 +76,7 @@ const EVENT_TABS = [
     'External Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL', '',
     'All Products (auto)']],
   ['Stock Moves', ['Date', 'Ref Code', 'Product', 'Qty (+refill / -return)', 'Note']],
-  ['Sales', ['Sale ID', 'Line', 'Date', 'Time', 'Seller', 'Ref Code', 'Product', 'Category', 'Qty', 'Unit Price (USD)', 'Discount %', 'Line Total (USD)', 'Payment Method', 'Online (USD)', 'Received USD', 'Received LBP', 'Change USD', 'Change LBP', 'Rounding (USD)', 'VAT (USD)', 'Void', 'Void Reason', 'Logged At']],
+  ['Sales', ['Sale ID', 'Line', 'Date', 'Time', 'Seller', 'Ref Code', 'Product', 'Category', 'Qty', 'Unit Price (USD)', 'Discount %', 'Line Total (USD)', 'Payment Method', 'Online (USD)', 'Received USD', 'Received LBP', 'Change USD', 'Change LBP', 'Rounding (USD)', 'VAT (USD)', 'Void', 'Void Reason', 'Logged At', 'Note']],
   ['Shifts', ['Date', 'Employee', 'Clock In', 'Clock Out', 'Hours', 'Note']],
   ['Cash', ['Date Time', 'Kind (Handover/Count)', 'USD', 'LBP', 'From', 'To', 'Note']],
   ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Kind (Sellable/Demo)', 'Expected', 'Counted', 'Difference', 'Counted By']],
@@ -169,6 +173,12 @@ function route_(req) {
     case 'getEvent': requireAdmin_(req); return { event: getEvent_(req.id) };
     case 'getInventory': requireAdmin_(req); return { inventory: getInventory_(req.id) };
     case 'setEventStatus': requireAdmin_(req); return { event: setEventStatus_(req.id, req.status) };
+    case 'eventPublic': return { event: eventPublic_(req.eventId) };
+    case 'staffLogin': return staffLogin_(req);
+    case 'posData': requireEventAccess_(req, req.eventId); return { pos: posData_(req.eventId, isAdmin_(req)) };
+    case 'recordSale': requireEventAccess_(req, req.eventId); return { sale: recordSale_(req.eventId, req.sale) };
+    case 'clock': requireEventAccess_(req, req.eventId); return { openShifts: clock_(req.eventId, req.name, req.direction, req.clientTime) };
+    case 'voidSale': requireAdmin_(req); return { sale: voidSale_(req.eventId, req.saleId, req.reason) };
     default: throw userError_('Unknown action.', 'bad_action');
   }
 }
@@ -209,12 +219,29 @@ function hmac_(text) {
   return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, '');
 }
 
-function requireAdmin_(req) {
+function tokenRole_(req) {
   const parts = String(req.token || '').split('.');
-  if (parts.length !== 3 || parts[0] !== 'admin') throw userError_('Please sign in again.', 'auth');
+  if (parts.length !== 3) throw userError_('Please sign in again.', 'auth');
   const exp = Number(parts[1]);
   if (!exp || exp < Date.now()) throw userError_('Your session expired. Please sign in again.', 'auth');
   if (hmac_(parts[0] + '.' + parts[1]) !== parts[2]) throw userError_('Please sign in again.', 'auth');
+  return parts[0];
+}
+
+function isAdmin_(req) {
+  try { return tokenRole_(req) === 'admin'; } catch (e) { return false; }
+}
+
+function requireAdmin_(req) {
+  if (tokenRole_(req) !== 'admin') throw userError_('Please sign in again.', 'auth');
+}
+
+/* Admin, or staff signed in with this event's PIN. */
+function requireEventAccess_(req, eventId) {
+  const role = tokenRole_(req);
+  if (role === 'admin') return role;
+  if (role === 'staff:' + eventId) return role;
+  throw userError_('Please enter the event PIN again.', 'auth');
 }
 
 /* ------------------------------------------------------------------ master sheet */
@@ -641,6 +668,327 @@ function setEventStatus_(id, status) {
   found.sheet.getRange(found.row, 7).setValue(status);
   found.values[6] = status;
   return rowToEvent_(found.values);
+}
+
+/* ------------------------------------------------------------------ POS */
+
+function eventPublic_(id) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  return { id: ev.id, name: ev.name, venue: ev.venue, status: ev.status, startDate: ev.startDate, endDate: ev.endDate, type: ev.type };
+}
+
+function staffLogin_(req) {
+  const id = String(req.eventId || '');
+  const ev = rowToEvent_(findEventRow_(id).values);
+  if (ev.status === 'Closed') throw userError_('This event is closed.', 'closed');
+  const cache = CacheService.getScriptCache();
+  const key = 'pinfail_' + id;
+  const fails = Number(cache.get(key) || 0);
+  if (fails >= 10) throw userError_('Too many wrong PINs. Wait 10 minutes and try again.', 'locked');
+  const pin = String(readEventSettings_(ev.sheetId)['PIN'] || '').trim();
+  if (!pin || String(req.pin || '').trim() !== pin) {
+    cache.put(key, String(fails + 1), 600);
+    Utilities.sleep(600);
+    throw userError_('Wrong PIN.', 'bad_pin');
+  }
+  const exp = Date.now() + STAFF_TOKEN_HOURS * 3600 * 1000;
+  return { token: signToken_('staff:' + id, exp), expires: exp, event: eventPublic_(id) };
+}
+
+function openEventForWrite_(id) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  if (ev.status === 'Closed') throw userError_('This event is closed. Reopen it to record sales.', 'closed');
+  return ev;
+}
+
+function tz_() { return 'Asia/Beirut'; }
+
+function when_(clientTime) {
+  const now = new Date();
+  const t = clientTime ? new Date(clientTime) : null;
+  // sales recorded offline keep the time they happened (up to 7 days back)
+  if (t && !isNaN(t) && t <= new Date(now.getTime() + 5 * 60000) && t >= new Date(now.getTime() - 7 * 86400000)) return t;
+  return now;
+}
+
+function round2_(n) { return Math.round(n * 100) / 100; }
+
+function activeStaffNames_(ss) {
+  return readStaff_(ss).filter(function (p) { return p.active; }).map(function (p) { return p.name; });
+}
+
+function openShifts_(ss) {
+  const rows = ss.getSheetByName('Shifts').getDataRange().getValues();
+  const open = {};
+  for (let i = 1; i < rows.length; i++) {
+    const name = String(rows[i][1] || '').trim();
+    if (!name) continue;
+    if (String(rows[i][2] || '').trim() && !String(rows[i][3] || '').trim()) open[name] = String(rows[i][2]);
+    else delete open[name];
+  }
+  return Object.keys(open).map(function (n) { return { name: n, since: open[n] }; });
+}
+
+/* Product pictures from the website, by SKU. Cached for 6 hours. */
+function pictures_() {
+  const cache = CacheService.getScriptCache();
+  const head = cache.get('pics_n');
+  if (head !== null) {
+    const keys = [];
+    for (let i = 0; i < Number(head); i++) keys.push('pics_' + i);
+    const got = cache.getAll(keys);
+    let json = '';
+    let complete = true;
+    keys.forEach(function (k) { if (got[k] == null) complete = false; else json += got[k]; });
+    if (complete) { try { return JSON.parse(json || '{}'); } catch (e) { /* refetch */ } }
+  }
+  const map = {};
+  const domain = String(masterSetting_('SHOP_DOMAIN') || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (domain) {
+    for (let page = 1; page <= 40; page++) {
+      let res;
+      try {
+        res = UrlFetchApp.fetch('https://' + domain + '/products.json?limit=250&page=' + page, { muteHttpExceptions: true });
+      } catch (e) { break; }
+      if (res.getResponseCode() !== 200) break;
+      let data;
+      try { data = JSON.parse(res.getContentText()); } catch (e) { break; }
+      const products = (data && data.products) || [];
+      if (!products.length) break;
+      products.forEach(function (p) {
+        const first = p.images && p.images[0] && p.images[0].src;
+        (p.variants || []).forEach(function (v) {
+          const sku = String(v.sku || '').trim();
+          if (!sku || map[sku]) return;
+          const img = (v.featured_image && v.featured_image.src) || first;
+          if (img) map[sku] = img;
+        });
+      });
+      if (products.length < 250) break;
+    }
+  }
+  const json = JSON.stringify(map);
+  const chunks = {};
+  const size = 90000;
+  let n = 0;
+  for (let i = 0; i < json.length; i += size) chunks['pics_' + (n++)] = json.slice(i, i + size);
+  chunks.pics_n = String(n);
+  try { cache.putAll(chunks, 21600); } catch (e) { /* cache is a bonus */ }
+  return map;
+}
+
+function saleSummaries_(rows, limit) {
+  const by = {};
+  const order = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const id = String(r[0] || '').trim();
+    if (!id) continue;
+    if (!by[id]) {
+      by[id] = { id: id, date: dateStr_(r[2]), time: timeStr_(r[3]), seller: String(r[4] || ''), method: String(r[12] || ''),
+        total: 0, units: 0, lines: [], void: !!String(r[20] || '').trim(), voidReason: String(r[21] || '') };
+      order.push(id);
+    }
+    const s = by[id];
+    s.total = round2_(s.total + (Number(r[11]) || 0));
+    s.units += Number(r[8]) || 0;
+    s.lines.push({ ref: String(r[5]), name: String(r[6]), qty: Number(r[8]) || 0, total: Number(r[11]) || 0 });
+    if (Number(r[1]) === 1) {
+      s.online = Number(r[13]) || 0; s.recvUsd = Number(r[14]) || 0; s.recvLbp = Number(r[15]) || 0;
+      s.changeUsd = Number(r[16]) || 0; s.changeLbp = Number(r[17]) || 0; s.discountPct = Number(r[10]) || 0;
+    }
+  }
+  return order.slice(-limit).reverse().map(function (id) { return by[id]; });
+}
+
+function timeStr_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz_(), 'HH:mm');
+  return String(v || '');
+}
+
+function posData_(id, admin) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const ss = SpreadsheetApp.openById(ev.sheetId);
+  const s = readEventSettings_(ev.sheetId);
+  const inv = getInventory_(id);
+  let pics = {};
+  try { pics = pictures_(); } catch (e) { pics = {}; }
+  const products = inv.items.map(function (it) {
+    return { ref: it.ref, name: it.name, category: it.category, price: it.price, live: it.live,
+      picture: it.picture || pics[it.ref] || '' };
+  }).sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
+  return {
+    event: eventPublic_(id),
+    fxRate: Number(s['Exchange Rate (LBP per USD)']) || 0,
+    maxDiscountPct: Number(s['Max Discount %']) || 0,
+    lbpStep: LBP_STEP,
+    staff: activeStaffNames_(ss),
+    openShifts: openShifts_(ss),
+    products: products,
+    recentSales: saleSummaries_(ss.getSheetByName('Sales').getDataRange().getValues(), admin ? 200 : 30),
+    warnings: admin ? inv.warnings : [],
+    serverTime: new Date().toISOString()
+  };
+}
+
+/* Records one sale. Prices come from the event sheet, never from the phone. Safe to send twice. */
+function recordSale_(id, sale) {
+  sale = sale || {};
+  const saleId = String(sale.id || '');
+  if (!/^[A-Za-z0-9-]{6,40}$/.test(saleId)) throw userError_('Bad sale number.', 'invalid');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const salesSheet = ss.getSheetByName('Sales');
+    const existing = salesSheet.getDataRange().getValues();
+    for (let i = 1; i < existing.length; i++) {
+      if (String(existing[i][0]) === saleId) {
+        return saleSummaries_(existing.filter(function (r, j) { return j === 0 || String(r[0]) === saleId; }), 1)[0];
+      }
+    }
+    const s = readEventSettings_(ev.sheetId);
+    const fx = Number(s['Exchange Rate (LBP per USD)']) || 0;
+    if (!fx) throw userError_('Set the exchange rate in the event Settings tab first.', 'invalid');
+    const maxDisc = Number(s['Max Discount %']) || 0;
+
+    const seller = String(sale.seller || '').trim();
+    if (activeStaffNames_(ss).indexOf(seller) < 0) throw userError_('Pick who made the sale.', 'invalid');
+
+    const items = {};
+    getInventory_(id).items.forEach(function (it) { items[it.ref] = it; });
+    const qtyByRef = {};
+    const refs = [];
+    (sale.lines || []).forEach(function (l) {
+      const ref = String(l.ref || '');
+      const q = Math.round(Number(l.qty));
+      if (!items[ref]) throw userError_('A product in this sale is not in the event listing anymore.', 'invalid');
+      if (!(q >= 1 && q <= 999)) throw userError_('Check the quantities.', 'invalid');
+      if (!qtyByRef[ref]) { qtyByRef[ref] = 0; refs.push(ref); }
+      qtyByRef[ref] += q;
+    });
+    if (!refs.length) throw userError_('The sale has no products.', 'invalid');
+
+    const disc = Number(sale.discountPct || 0);
+    if (!(disc >= 0 && disc <= maxDisc)) throw userError_('The discount is above the ' + maxDisc + '% allowed for this event.', 'invalid');
+
+    const gross = refs.map(function (r) { return items[r].price * qtyByRef[r]; });
+    const lineTotals = gross.map(function (g) { return round2_(g * (1 - disc / 100)); });
+    const total = round2_(gross.reduce(function (a, b) { return a + b; }, 0) * (1 - disc / 100));
+    lineTotals[lineTotals.length - 1] = round2_(lineTotals[lineTotals.length - 1] + total - lineTotals.reduce(function (a, b) { return a + b; }, 0));
+
+    const method = sale.method;
+    if (['Cash', 'Online', 'Split'].indexOf(method) < 0) throw userError_('Pick how the customer paid.', 'invalid');
+    let online = 0;
+    if (method === 'Online') online = total;
+    if (method === 'Split') {
+      online = round2_(Number(sale.onlineUsd) || 0);
+      if (!(online > 0 && online < total)) throw userError_('For a split payment, the online part must be between $0 and the total.', 'invalid');
+    }
+    const cashDue = round2_(total - online);
+    let recvUsd = 0, recvLbp = 0, changeUsd = 0, changeLbp = 0, rounding = 0;
+    if (cashDue > 0) {
+      recvUsd = Math.max(0, Number(sale.recvUsd) || 0);
+      recvLbp = Math.max(0, Math.round(Number(sale.recvLbp) || 0));
+      changeUsd = Math.max(0, Number(sale.changeUsd) || 0);
+      changeLbp = Math.max(0, Math.round(Number(sale.changeLbp) || 0));
+      const tolerance = LBP_STEP / fx + 0.005;
+      const paid = recvUsd + recvLbp / fx;
+      if (paid < cashDue - tolerance) throw userError_('The cash received is less than the amount due.', 'invalid');
+      const changeDue = paid - cashDue;
+      rounding = round2_(changeDue - changeUsd - changeLbp / fx);
+      if (Math.abs(rounding) > 1 + tolerance) throw userError_('The change given does not match the change due.', 'invalid');
+    }
+
+    const t = when_(sale.clientTime);
+    const date = Utilities.formatDate(t, tz_(), 'yyyy-MM-dd');
+    const time = Utilities.formatDate(t, tz_(), 'HH:mm');
+    const loggedAt = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm:ss');
+    const note = String(sale.note || '').slice(0, 200);
+    const rows = refs.map(function (ref, i) {
+      const it = items[ref];
+      const first = i === 0;
+      return [saleId, i + 1, date, time, seller, ref, it.name, it.category, qtyByRef[ref], it.price, disc, lineTotals[i],
+        method, first ? online : '', first ? recvUsd : '', first ? recvLbp : '', first ? changeUsd : '', first ? changeLbp : '',
+        first ? rounding : '', round2_(lineTotals[i] * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt, first ? note : ''];
+    });
+    const start = salesSheet.getLastRow() + 1;
+    salesSheet.getRange(start, 1, rows.length, 3).setNumberFormat('@');
+    salesSheet.getRange(start, 4, rows.length, 1).setNumberFormat('@');
+    salesSheet.getRange(start, 6, rows.length, 1).setNumberFormat('@');
+    salesSheet.getRange(start, 1, rows.length, rows[0].length).setValues(rows);
+    return saleSummaries_([existing[0]].concat(rows), 1)[0];
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function clock_(id, name, direction, clientTime) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    name = String(name || '').trim();
+    if (activeStaffNames_(ss).indexOf(name) < 0) throw userError_('This name is not in the staff list.', 'invalid');
+    const sh = ss.getSheetByName('Shifts');
+    const t = when_(clientTime);
+    const stamp = Utilities.formatDate(t, tz_(), 'yyyy-MM-dd HH:mm');
+    const rows = sh.getDataRange().getValues();
+    let openRow = -1;
+    for (let i = rows.length - 1; i >= 1; i--) {
+      if (String(rows[i][1]).trim() === name) {
+        if (String(rows[i][2] || '').trim() && !String(rows[i][3] || '').trim()) openRow = i;
+        break;
+      }
+    }
+    if (direction === 'in') {
+      if (openRow < 0) {
+        const r = sh.getLastRow() + 1;
+        sh.getRange(r, 1, 1, 6).setNumberFormat('@').setValues([[Utilities.formatDate(t, tz_(), 'yyyy-MM-dd'), name, stamp, '', '', '']]);
+      }
+    } else if (direction === 'out') {
+      if (openRow >= 0) {
+        let start = null;
+        try { start = Utilities.parseDate(String(rows[openRow][2]), tz_(), 'yyyy-MM-dd HH:mm'); } catch (e) { start = null; }
+        const end = Utilities.parseDate(stamp, tz_(), 'yyyy-MM-dd HH:mm');
+        const hours = start ? round2_(Math.max(0, (end - start) / 3600000)) : '';
+        sh.getRange(openRow + 1, 4, 1, 2).setValues([[stamp, hours]]);
+      }
+    } else {
+      throw userError_('Clock in or out?', 'invalid');
+    }
+    return openShifts_(ss);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function voidSale_(id, saleId, reason) {
+  reason = String(reason || '').trim();
+  if (!reason) throw userError_('Give a reason for the void.', 'invalid');
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const sh = SpreadsheetApp.openById(ev.sheetId).getSheetByName('Sales');
+  const rows = sh.getDataRange().getValues();
+  let found = false;
+  for (let i = 1; i < rows.length; i++) {
+    if (String(rows[i][0]) === String(saleId)) {
+      sh.getRange(i + 1, 21, 1, 2).setValues([['Y', reason]]);
+      rows[i][20] = 'Y'; rows[i][21] = reason;
+      found = true;
+    }
+  }
+  if (!found) throw userError_('Sale not found.', 'not_found');
+  return saleSummaries_(rows.filter(function (r, j) { return j === 0 || String(r[0]) === String(saleId); }), 1)[0];
+}
+
+/* Run once from the editor after updating, so Google asks for the new "connect to the website" permission. */
+function authorize() {
+  CacheService.getScriptCache().remove('pics_n');
+  const n = Object.keys(pictures_()).length;
+  Logger.log('Pictures found on the website: ' + n);
+  return n;
 }
 
 /* ------------------------------------------------------------------ helpers */

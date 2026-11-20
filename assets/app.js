@@ -1,4 +1,4 @@
-/* SHN LEB Events — web app (Phase 2: + inventory, staff) */
+/* SHN LEB Events — web app: admin side, router, shared helpers (POS lives in pos.js) */
 (function () {
   'use strict';
 
@@ -7,7 +7,7 @@
   var TABS = [
     { id: 'settings', label: 'Settings' },
     { id: 'inventory', label: 'Inventory' },
-    { id: 'pos', label: 'POS', phase: 3 },
+    { id: 'pos', label: 'POS' },
     { id: 'cash', label: 'Cash', phase: 4 },
     { id: 'shifts', label: 'Shifts', phase: 4 },
     { id: 'expenses', label: 'Expenses', phase: 5 },
@@ -48,18 +48,22 @@
   }
 
   /* ---------------- api */
-  function api(action, data) {
-    var body = Object.assign({ action: action, token: getToken() }, data || {});
+  /* opts.token: send this token instead of the admin one; opts.quiet: don't redirect on auth errors */
+  function api(action, data, opts) {
+    opts = opts || {};
+    var body = Object.assign({ action: action, token: opts.token || getToken() }, data || {});
     return fetch(API_URL, { method: 'POST', body: JSON.stringify(body), redirect: 'follow' })
       .then(function (r) {
-        if (!r.ok) throw new Error('The server did not answer (' + r.status + ').');
+        if (!r.ok) { var e = new Error('The server did not answer (' + r.status + ').'); e.offline = true; throw e; }
         return r.json();
       }, function () {
-        throw new Error('No connection. Check the internet and try again.');
+        var e = new Error('No connection. Check the internet and try again.');
+        e.offline = true;
+        throw e;
       })
       .then(function (res) {
         if (!res.ok) {
-          if (res.code === 'auth') { setToken(null); go('#/login'); }
+          if (res.code === 'auth' && !opts.token && !opts.quiet) { setToken(null); go('#/login'); }
           var err = new Error(res.error || 'Something went wrong.');
           err.code = res.code;
           throw err;
@@ -337,6 +341,7 @@
     var body = document.getElementById('tabBody');
     if (tab === 'settings') body.innerHTML = settingsHtml(ev);
     else if (tab === 'inventory') viewInventory(body, ev);
+    else if (tab === 'pos') window.SHN_POS.mount(body, { eventId: ev.id, token: getToken(), admin: true });
     else {
       var def = TABS.filter(function (t) { return t.id === tab; })[0] || TABS[0];
       body.innerHTML = '<div class="card placeholder"><h2>' + esc(def.label) + '</h2>' +
@@ -515,7 +520,14 @@
   }
 
   /* ---------------- router */
+  var staffEvent = new URLSearchParams(location.search).get('e');
+
   function render() {
+    if (staffEvent) {
+      if (!API_URL) return viewNotConfigured();
+      return window.SHN_POS.staff(staffEvent);
+    }
+    if (window.SHN_POS) window.SHN_POS.unmount();
     setTopbar();
     if (!API_URL) return viewNotConfigured();
     var hash = location.hash || '#/';
@@ -526,6 +538,14 @@
     return viewHome();
   }
 
+  window.SHN = {
+    api: api, esc: esc, num: num, money: money, toast: toast, fmtRange: fmtRange, phase: phase,
+    app: app, topbarRight: topbarRight, isAdmin: function () { return !!getToken(); }
+  };
+
   window.addEventListener('hashchange', render);
-  render();
+  window.addEventListener('DOMContentLoaded', function () { render(); });
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
+  }
 })();
