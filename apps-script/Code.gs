@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -79,8 +79,9 @@ const EVENT_TABS = [
   ['Stock Moves', ['Date', 'Ref Code', 'Product', 'Qty (+refill / -return)', 'Note']],
   ['Sales', ['Sale ID', 'Line', 'Date', 'Time', 'Seller', 'Ref Code', 'Product', 'Category', 'Qty', 'Unit Price (USD)', 'Discount %', 'Line Total (USD)', 'Payment Method', 'Online (USD)', 'Received USD', 'Received LBP', 'Change USD', 'Change LBP', 'Rounding (USD)', 'VAT (USD)', 'Void', 'Void Reason', 'Logged At', 'Note', 'Return Of']],
   ['Shifts', ['Date', 'Employee', 'Clock In', 'Clock Out', 'Hours', 'Note']],
-  ['Cash', ['Date Time', 'Kind (Handover/Count)', 'USD', 'LBP', 'From', 'To', 'Note']],
-  ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Kind (Sellable/Demo)', 'Expected', 'Counted', 'Difference', 'Counted By']],
+  ['Cash', ['Entry ID', 'Date Time', 'Kind', 'USD', 'LBP', 'Counted / Handed By', 'Handed To', 'Note', 'Expected USD', 'Expected LBP', 'Diff USD', 'Diff LBP', 'Purpose', 'Day', 'Banknotes']],
+  ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Expected Sellable', 'Counted Sellable', 'Diff Sellable', 'Expected Demo', 'Counted Demo', 'Diff Demo', 'Counted By', 'Purpose', 'Day']],
+  ['Days', ['Day', 'Date', 'Opened At', 'Opened By', 'Closed At', 'Closed By', 'Opening Cash Diff USD', 'Opening Cash Diff LBP', 'Opening Stock Diff (units)', 'Closing Cash Diff USD', 'Closing Cash Diff LBP', 'Closing Stock Diff (units)', 'Cash Variance During Day USD', 'Cash Variance During Day LBP', 'Stock Variance During Day (units)', 'Demo Units Missing (closing)', 'Sales (USD)', 'Online (USD)', 'Units Sold', 'Status']],
   ['Expenses', ['Date', 'Type', 'Description', 'Amount USD', 'Amount LBP', 'Total USD']],
   ['P&L', ['Line', 'USD']],
   ['Sales Tracker', ['Date', 'Product Code', 'Description', 'Qty', 'Total Sales $', 'Country', 'Channel', 'Channel Type', 'Warehouse', 'Delivered by', 'Sales Date', 'Invoice Date', 'Invoice number', 'Parent Account', 'Customer', 'Branch', 'Product Ref.', 'Description', 'Quantity', 'Unit Amount HT (Invoiced)', 'Currency', 'Total Amount HT (Invoiced)', 'Total VAT (Invoiced)']]
@@ -185,6 +186,10 @@ function route_(req) {
     case 'voidSale': requireAdmin_(req); return { sale: voidSale_(req.eventId, req.saleId, req.reason) };
     case 'recordReturn': requireEventAccess_(req, req.eventId); return { sale: recordReturn_(req.eventId, req.ret) };
     case 'logError': logError_(req.error || {}); return {};
+    case 'recordCount': requireEventAccess_(req, req.eventId); return { count: recordCount_(req.eventId, req.count) };
+    case 'recordCash': requireEventAccess_(req, req.eventId); return { cash: recordCash_(req.eventId, req.cash) };
+    case 'dayAction': requireEventAccess_(req, req.eventId); return { day: dayAction_(req.eventId, req.day) };
+    case 'eventReport': requireAdmin_(req); return { report: eventReport_(req.id) };
     default: throw userError_('Unknown action.', 'bad_action');
   }
 }
@@ -523,12 +528,12 @@ function buildInventoryTabs_(ss, catalogue) {
     warn(ss.getSheetByName(a[0]).getRange(1, a[1], MAX_ROWS + 1, a[2] - a[1] + 1), 'Filled automatically from the product name');
   });
   warn(lst.getRange(1, ALL_NAMES_COL, MAX_ROWS + 1, 1), 'Automatic list for the Stock Moves dropdown');
-  ['Settings', 'Listing', 'Stock Moves', 'Sales', 'Shifts', 'Cash', 'Counts', 'Expenses', 'P&L', 'Sales Tracker'].forEach(function (t) {
+  ['Settings', 'Listing', 'Stock Moves', 'Sales', 'Shifts', 'Cash', 'Counts', 'Days', 'Expenses', 'P&L', 'Sales Tracker'].forEach(function (t) {
     const sh = ss.getSheetByName(t);
     warn(sh.getRange(1, 1, 1, sh.getMaxColumns()), 'Column headers used by the app');
   });
   warn(set.getRange(2, 1, 1, 3), 'Event ID: do not change');
-  ['Sales', 'Shifts', 'Cash', 'Counts'].forEach(function (t) {
+  ['Sales', 'Shifts', 'Cash', 'Counts', 'Days'].forEach(function (t) {
     warn(ss.getSheetByName(t).getRange(2, 1, MAX_ROWS, ss.getSheetByName(t).getMaxColumns()), 'Written by the app');
   });
 
@@ -540,7 +545,7 @@ function buildInventoryTabs_(ss, catalogue) {
 }
 
 /* Live stock for the Inventory tab (and the POS later). */
-function getInventory_(id) {
+function getInventory_(id, asOf) {
   const ev = rowToEvent_(findEventRow_(id).values);
   const ss = SpreadsheetApp.openById(ev.sheetId);
   ['Listing', 'Stock Moves', 'Sales'].forEach(function (t) {
@@ -613,6 +618,7 @@ function getInventory_(id) {
   for (let i = 1; i < sales.length; i++) {
     const r = sales[i];
     if (String(r[20] || '').trim()) continue; // voided
+    if (asOf && saleStamp_(r) > asOf) continue;
     const ref = String(r[5] || '').trim();
     if (items[ref]) items[ref].sold += qty(r[8]);
   }
@@ -841,7 +847,7 @@ function posData_(id, admin) {
   let pics = {};
   try { pics = pictures_(); } catch (e) { pics = {}; }
   const products = inv.items.map(function (it) {
-    return { ref: it.ref, name: it.name, category: it.category, price: it.price, live: it.live,
+    return { ref: it.ref, name: it.name, category: it.category, price: it.price, live: it.live, demo: it.demo,
       picture: it.picture || pics[it.ref] || '' };
   }).sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
   return {
@@ -854,6 +860,8 @@ function posData_(id, admin) {
     openShifts: openShifts_(ss),
     products: products,
     recentSales: saleSummaries_(ss.getSheetByName('Sales').getDataRange().getValues(), admin ? 200 : 30),
+    day: dayState_(ss),
+    expectedCash: expectedCash_(ss, s, null),
     warnings: admin ? inv.warnings : [],
     serverTime: new Date().toISOString()
   };
@@ -1042,6 +1050,324 @@ function recordReturn_(id, ret) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ------------------------------------------------------------------ business days, counts, cash */
+
+function nowStamp_(t) { return Utilities.formatDate(t || new Date(), tz_(), 'yyyy-MM-dd HH:mm'); }
+
+function saleStamp_(r) { return dateStr_(r[2]) + ' ' + timeStr_(r[3]); }
+
+function needTab_(ss, name) {
+  const sh = ss.getSheetByName(name);
+  if (!sh) throw userError_('This event was created with an older version of the app. Create a new event.', 'old_event');
+  return sh;
+}
+
+function dayState_(ss) {
+  const sh = ss.getSheetByName('Days');
+  if (!sh) return { open: false, number: 0, next: 1, counts: {} };
+  const rows = sh.getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim(); });
+  const last = rows[rows.length - 1];
+  const open = !!last && String(last[19]) === 'Open';
+  const number = open ? Number(last[0]) : 0;
+  const tag = open ? number : rows.length + 1; // counts before "Start day" belong to the coming day
+  const purposeWanted = open ? 'Closing' : 'Opening';
+  const counts = { cash: false, stock: false };
+  needTab_(ss, 'Cash').getDataRange().getValues().slice(1).forEach(function (r) {
+    if (String(r[2]) === 'Count' && Number(r[13]) === tag && String(r[12]) === purposeWanted) counts.cash = true;
+  });
+  needTab_(ss, 'Counts').getDataRange().getValues().slice(1).forEach(function (r) {
+    if (Number(r[12]) === tag && String(r[11]) === purposeWanted) counts.stock = true;
+  });
+  return { open: open, number: number, next: rows.length + 1, tag: tag, openedAt: open ? String(last[2]) : '', openedBy: open ? String(last[3]) : '',
+    counts: counts, countsFor: purposeWanted, lastClosedAt: !open && last ? String(last[4]) : '' };
+}
+
+/* What should be in the drawer: opening cash + cash taken − change and refunds given − handovers. */
+function expectedCash_(ss, settings, asOf) {
+  let usd = Number(settings['Opening Cash USD']) || 0;
+  let lbp = Number(settings['Opening Cash LBP']) || 0;
+  ss.getSheetByName('Sales').getDataRange().getValues().slice(1).forEach(function (r) {
+    if (Number(r[1]) !== 1 || String(r[20] || '').trim()) return;
+    if (asOf && saleStamp_(r) > asOf) return;
+    usd += (Number(r[14]) || 0) - (Number(r[16]) || 0);
+    lbp += (Number(r[15]) || 0) - (Number(r[17]) || 0);
+  });
+  const cash = ss.getSheetByName('Cash');
+  if (cash) cash.getDataRange().getValues().slice(1).forEach(function (r) {
+    if (String(r[2]) !== 'Handover') return;
+    if (asOf && String(r[1]) > asOf) return;
+    usd -= Number(r[3]) || 0;
+    lbp -= Number(r[4]) || 0;
+  });
+  return { usd: round2_(usd), lbp: Math.round(lbp) };
+}
+
+function idCheck_(id, what) {
+  id = String(id || '');
+  if (!/^[A-Za-z0-9-]{6,40}$/.test(id)) throw userError_('Bad ' + what + ' number.', 'invalid');
+  return id;
+}
+
+function alreadyIn_(sh, id) {
+  return sh.getDataRange().getValues().slice(1).some(function (r) { return String(r[0]) === id; });
+}
+
+function purpose_(p) { return ['Opening', 'Closing', 'Spot'].indexOf(p) >= 0 ? p : 'Spot'; }
+
+/* Stock count: one row per product, expected worked out at the moment of the count. */
+function recordCount_(id, c) {
+  c = c || {};
+  const cid = idCheck_(c.id, 'count');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const sh = needTab_(ss, 'Counts');
+    const by = String(c.countedBy || '').trim();
+    if (activeStaffNames_(ss).indexOf(by) < 0) throw userError_('Pick who counted.', 'invalid');
+    const t = when_(c.clientTime);
+    const stamp = nowStamp_(t);
+    const items = {};
+    getInventory_(id, stamp).items.forEach(function (it) { items[it.ref] = it; });
+    const state = dayState_(ss);
+    const purpose = purpose_(c.purpose);
+    let rows = [];
+    const result = [];
+    (c.lines || []).forEach(function (l) {
+      const it = items[String(l.ref)];
+      if (!it) return;
+      const hasS = l.sellable !== '' && l.sellable != null, hasD = l.demo !== '' && l.demo != null;
+      if (!hasS && !hasD) return;
+      const cs = hasS ? Math.round(Number(l.sellable)) : '', cd = hasD ? Math.round(Number(l.demo)) : '';
+      const ds = hasS ? cs - it.live : '', dd = hasD ? cd - it.demo : '';
+      rows.push([cid, stamp, it.ref, it.name, it.live, cs, ds, it.demo, cd, dd, by, purpose, state.tag]);
+      result.push({ ref: it.ref, diffSellable: ds, diffDemo: dd });
+    });
+    if (!rows.length) throw userError_('Enter at least one quantity.', 'invalid');
+    if (!alreadyIn_(sh, cid)) {
+      const start = sh.getLastRow() + 1;
+      sh.getRange(start, 1, rows.length, 4).setNumberFormat('@');
+      sh.getRange(start, 1, rows.length, rows[0].length).setValues(rows);
+    }
+    const off = result.filter(function (x) { return (x.diffSellable || 0) !== 0 || (x.diffDemo || 0) !== 0; }).length;
+    return { id: cid, purpose: purpose, day: state.tag, lines: result, productsOff: off };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* Cash count (by banknotes) or handover. A count reports only whether it matches, never the expected amount. */
+function recordCash_(id, c) {
+  c = c || {};
+  const eid = idCheck_(c.id, 'cash entry');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const sh = needTab_(ss, 'Cash');
+    const t = when_(c.clientTime);
+    const stamp = nowStamp_(t);
+    const by = String(c.by || '').trim().slice(0, 80);
+    const usd = round2_(Math.max(0, Number(c.usd) || 0));
+    const lbp = Math.max(0, Math.round(Number(c.lbp) || 0));
+    const state = dayState_(ss);
+    if (c.kind === 'handover') {
+      const to = String(c.to || '').trim().slice(0, 80);
+      if (!to) throw userError_('Who collected the cash?', 'invalid');
+      if (!usd && !lbp) throw userError_('Enter the amount handed over.', 'invalid');
+      if (!alreadyIn_(sh, eid)) {
+        sh.appendRow([eid, stamp, 'Handover', usd, lbp, by, to, String(c.note || '').slice(0, 200), '', '', '', '', '', state.tag, '']);
+      }
+      return { id: eid, kind: 'handover' };
+    }
+    if (activeStaffNames_(ss).indexOf(by) < 0) throw userError_('Pick who counted.', 'invalid');
+    const exp = expectedCash_(ss, readEventSettings_(ev.sheetId), stamp);
+    const diffUsd = round2_(usd - exp.usd), diffLbp = lbp - exp.lbp;
+    const purpose = purpose_(c.purpose);
+    if (!alreadyIn_(sh, eid)) {
+      sh.appendRow([eid, stamp, 'Count', usd, lbp, by, '', String(c.note || '').slice(0, 200), exp.usd, exp.lbp, diffUsd, diffLbp, purpose, state.tag,
+        JSON.stringify(c.banknotes || {}).slice(0, 500)]);
+    } else {
+      const row = sh.getDataRange().getValues().filter(function (r) { return String(r[0]) === eid; })[0];
+      return { id: eid, kind: 'count', diffUsd: Number(row[10]), diffLbp: Number(row[11]), purpose: String(row[12]) };
+    }
+    return { id: eid, kind: 'count', diffUsd: diffUsd, diffLbp: diffLbp, purpose: purpose };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function latestCash_(rows, day, purpose) {
+  const m = rows.filter(function (r) { return String(r[2]) === 'Count' && Number(r[13]) === day && String(r[12]) === purpose; });
+  return m.length ? m[m.length - 1] : null;
+}
+
+function latestStock_(rows, day, purpose) {
+  const m = rows.filter(function (r) { return Number(r[12]) === day && String(r[11]) === purpose; });
+  if (!m.length) return null;
+  const lastId = String(m[m.length - 1][0]);
+  const lines = m.filter(function (r) { return String(r[0]) === lastId; });
+  return {
+    net: lines.reduce(function (a, r) { return a + (Number(r[6]) || 0); }, 0),
+    demoMissing: lines.reduce(function (a, r) { return a + Math.max(0, -(Number(r[9]) || 0)); }, 0)
+  };
+}
+
+/* Start day / Close day. Closing writes the day's report row in the Days tab. */
+function dayAction_(id, d) {
+  d = d || {};
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const sh = needTab_(ss, 'Days');
+    const state = dayState_(ss);
+    const by = String(d.by || '').trim().slice(0, 80);
+    const t = when_(d.clientTime);
+    const stamp = nowStamp_(t);
+    const cashRows = needTab_(ss, 'Cash').getDataRange().getValues().slice(1);
+    const countRows = needTab_(ss, 'Counts').getDataRange().getValues().slice(1);
+    if (d.action === 'open') {
+      if (state.open) return dayState_(ss); // already open (e.g. sent twice)
+      const oc = latestCash_(cashRows, state.next, 'Opening');
+      const os = latestStock_(countRows, state.next, 'Opening');
+      const r = sh.getLastRow() + 1;
+      sh.getRange(r, 1, 1, 20).setNumberFormat('@').setValues([[String(state.next), stamp.slice(0, 10), stamp, by, '', '',
+        oc ? oc[10] : '', oc ? oc[11] : '', os ? os.net : '', '', '', '', '', '', '', '', '', '', '', 'Open']]);
+      return dayState_(ss);
+    }
+    if (d.action === 'close') {
+      if (!state.open) return dayState_(ss);
+      const rows = sh.getDataRange().getValues();
+      const rowIdx = rows.length; // last row is the open day
+      const day = state.number;
+      const cc = latestCash_(cashRows, day, 'Closing');
+      const cs = latestStock_(countRows, day, 'Closing');
+      // start of the day: its opening count, else the previous day's closing count
+      const prev = rows[rowIdx - 2] && Number(rows[rowIdx - 2][0]) ? rows[rowIdx - 2] : null;
+      const openRow = rows[rowIdx - 1];
+      const startUsd = openRow[6] !== '' ? Number(openRow[6]) : (prev && prev[9] !== '' ? Number(prev[9]) : null);
+      const startLbp = openRow[7] !== '' ? Number(openRow[7]) : (prev && prev[10] !== '' ? Number(prev[10]) : null);
+      const startStock = openRow[8] !== '' ? Number(openRow[8]) : (prev && prev[11] !== '' ? Number(prev[11]) : null);
+      let sales = 0, online = 0, units = 0;
+      ss.getSheetByName('Sales').getDataRange().getValues().slice(1).forEach(function (r) {
+        if (String(r[20] || '').trim()) return;
+        const st = saleStamp_(r);
+        if (st < state.openedAt || st > stamp) return;
+        sales += Number(r[11]) || 0;
+        units += Number(r[8]) || 0;
+        if (Number(r[1]) === 1) online += Number(r[13]) || 0;
+      });
+      const v = function (a, b) { return a === null || b === null || b === '' ? '' : round2_(Number(b) - a); };
+      sh.getRange(rowIdx, 5, 1, 16).setValues([[stamp, by,
+        openRow[6], openRow[7], openRow[8],
+        cc ? cc[10] : '', cc ? cc[11] : '', cs ? cs.net : '',
+        cc ? v(startUsd, cc[10]) : '', cc ? v(startLbp, cc[11]) : '', cs ? v(startStock, cs.net) : '',
+        cs ? cs.demoMissing : '', round2_(sales), round2_(online), units, 'Closed']]);
+      return dayState_(ss);
+    }
+    throw userError_('Start or close the day?', 'invalid');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* For the management tabs: cash, shifts and pay, counts, days. */
+function eventReport_(id) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const ss = SpreadsheetApp.openById(ev.sheetId);
+  const settings = readEventSettings_(ev.sheetId);
+  const staff = readStaff_(ss);
+  const byName = {};
+  staff.forEach(function (p) { byName[p.name] = p; });
+  const sales = ss.getSheetByName('Sales').getDataRange().getValues().slice(1);
+
+  // cash
+  let recvUsd = 0, recvLbp = 0, chUsd = 0, chLbp = 0, online = 0;
+  sales.forEach(function (r) {
+    if (Number(r[1]) !== 1 || String(r[20] || '').trim()) return;
+    recvUsd += Number(r[14]) || 0; recvLbp += Number(r[15]) || 0;
+    chUsd += Number(r[16]) || 0; chLbp += Number(r[17]) || 0; online += Number(r[13]) || 0;
+  });
+  const cashRows = (ss.getSheetByName('Cash') ? ss.getSheetByName('Cash').getDataRange().getValues().slice(1) : []).filter(function (r) { return String(r[0]).trim(); });
+  const handovers = cashRows.filter(function (r) { return String(r[2]) === 'Handover'; }).map(function (r) {
+    return { at: String(r[1]), usd: Number(r[3]) || 0, lbp: Number(r[4]) || 0, by: String(r[5]), to: String(r[6]), note: String(r[7]), day: r[13] };
+  });
+  const counts = cashRows.filter(function (r) { return String(r[2]) === 'Count'; }).map(function (r) {
+    return { at: String(r[1]), usd: Number(r[3]) || 0, lbp: Number(r[4]) || 0, by: String(r[5]), expUsd: Number(r[8]) || 0, expLbp: Number(r[9]) || 0,
+      diffUsd: Number(r[10]) || 0, diffLbp: Number(r[11]) || 0, purpose: String(r[12]), day: r[13] };
+  });
+
+  // commission per seller per day, on the price actually paid
+  const comm = {}, unitsBy = {};
+  sales.forEach(function (r) {
+    if (String(r[20] || '').trim()) return;
+    const q = Number(r[8]) || 0;
+    if (!q) return;
+    const p = byName[String(r[4])];
+    if (!p) return;
+    const unitPaid = Math.abs(Number(r[11]) || 0) / Math.abs(q);
+    const rate = unitPaid >= p.threshold ? p.commissionOver : p.commissionUnder;
+    const k = dateStr_(r[2]) + '|' + p.name;
+    comm[k] = round2_((comm[k] || 0) + rate * q);
+    unitsBy[k] = (unitsBy[k] || 0) + q;
+  });
+
+  // shifts → hours per person per day
+  const shiftRows = ss.getSheetByName('Shifts').getDataRange().getValues().slice(1).filter(function (r) { return String(r[1]).trim(); });
+  const days = {};
+  shiftRows.forEach(function (r, i) {
+    const k = dateStr_(r[0]) + '|' + String(r[1]).trim();
+    const d = days[k] = days[k] || { date: dateStr_(r[0]), name: String(r[1]).trim(), shifts: [], hours: 0, notes: [], open: false };
+    const hours = Number(r[4]) || 0;
+    d.shifts.push({ in: String(r[2]).slice(11), out: String(r[3]).slice(11), hours: hours, row: i + 2 });
+    d.hours = round2_(d.hours + hours);
+    if (String(r[5]).trim()) d.notes.push(String(r[5]));
+    if (String(r[2]).trim() && !String(r[3]).trim()) d.open = true;
+  });
+  Object.keys(comm).forEach(function (k) {
+    if (!days[k]) { const parts = k.split('|'); days[k] = { date: parts[0], name: parts[1], shifts: [], hours: 0, notes: [], open: false }; }
+  });
+  const pay = Object.keys(days).map(function (k) {
+    const d = days[k];
+    const p = byName[d.name] || { hourlyRate: 0 };
+    d.rate = p.hourlyRate;
+    d.hoursCost = round2_(d.hours * p.hourlyRate);
+    d.commission = comm[k] || 0;
+    d.units = unitsBy[k] || 0;
+    d.pay = round2_(d.hoursCost + d.commission);
+    return d;
+  }).sort(function (a, b) { return a.date === b.date ? (a.name < b.name ? -1 : 1) : (a.date < b.date ? 1 : -1); });
+
+  // latest stock count per product
+  const countRows = ss.getSheetByName('Counts') ? ss.getSheetByName('Counts').getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim(); }) : [];
+  const lastCount = {};
+  countRows.forEach(function (r) {
+    lastCount[String(r[2])] = { at: String(r[1]), by: String(r[10]), purpose: String(r[11]), diffSellable: r[6] === '' ? null : Number(r[6]), diffDemo: r[9] === '' ? null : Number(r[9]) };
+  });
+  const dayRows = ss.getSheetByName('Days') ? ss.getSheetByName('Days').getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim(); }) : [];
+
+  return {
+    cash: {
+      opening: { usd: Number(settings['Opening Cash USD']) || 0, lbp: Number(settings['Opening Cash LBP']) || 0 },
+      received: { usd: round2_(recvUsd), lbp: Math.round(recvLbp) }, given: { usd: round2_(chUsd), lbp: Math.round(chLbp) },
+      handedOver: { usd: round2_(handovers.reduce(function (a, h) { return a + h.usd; }, 0)), lbp: handovers.reduce(function (a, h) { return a + h.lbp; }, 0) },
+      expected: expectedCash_(ss, settings, null), online: round2_(online), handovers: handovers.reverse(), counts: counts.reverse()
+    },
+    pay: pay,
+    lastCount: lastCount,
+    days: dayRows.map(function (r) {
+      return { day: r[0], date: String(r[1]), openedAt: String(r[2]), openedBy: String(r[3]), closedAt: String(r[4]), closedBy: String(r[5]),
+        openCashUsd: r[6], openCashLbp: r[7], openStock: r[8], closeCashUsd: r[9], closeCashLbp: r[10], closeStock: r[11],
+        varUsd: r[12], varLbp: r[13], varStock: r[14], demoMissing: r[15], sales: r[16], online: r[17], units: r[18], status: String(r[19]) };
+    }).reverse(),
+    fxRate: Number(settings['Exchange Rate (LBP per USD)']) || 0
+  };
 }
 
 /* Errors from phones, laptops and the server land in the master sheet's Errors tab. */

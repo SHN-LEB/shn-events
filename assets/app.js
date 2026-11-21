@@ -2,15 +2,16 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.5.0';
+  var APP_VERSION = '1.6.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var TABS = [
     { id: 'settings', label: 'Settings' },
     { id: 'inventory', label: 'Inventory' },
     { id: 'pos', label: 'POS' },
-    { id: 'cash', label: 'Cash', phase: 4 },
-    { id: 'shifts', label: 'Shifts', phase: 4 },
+    { id: 'cash', label: 'Cash' },
+    { id: 'shifts', label: 'Shifts & pay' },
+    { id: 'days', label: 'Days' },
     { id: 'expenses', label: 'Expenses', phase: 5 },
     { id: 'dashboard', label: 'Dashboard', phase: 5 },
     { id: 'pnl', label: 'P&L', phase: 5 }
@@ -298,6 +299,7 @@
   function viewEvent(id, tab) {
     if (!state.event || state.event.id !== id) {
       state.inv = null;
+      state.report = null;
       loading('Opening event…');
       api('getEvent', { id: id }).then(function (res) {
         state.event = res.event;
@@ -344,6 +346,7 @@
     if (tab === 'settings') body.innerHTML = settingsHtml(ev);
     else if (tab === 'inventory') viewInventory(body, ev);
     else if (tab === 'pos') window.SHN_POS.mount(body, { eventId: ev.id, token: getToken(), admin: true });
+    else if (tab === 'cash' || tab === 'shifts' || tab === 'days') viewReport(body, ev, tab);
     else {
       var def = TABS.filter(function (t) { return t.id === tab; })[0] || TABS[0];
       body.innerHTML = '<div class="card placeholder"><h2>' + esc(def.label) + '</h2>' +
@@ -472,6 +475,93 @@
     document.getElementById('invCat').onchange = function () { state.invCat = this.value; drawInvList(items); };
     drawInvList(items);
   }
+
+  /* ---------------- management reports: cash, shifts & pay, days */
+  function viewReport(body, ev, tab) {
+    if (!state.report || state.report.id !== ev.id) {
+      body.innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>';
+      api('eventReport', { id: ev.id }).then(function (res) {
+        state.report = { id: ev.id, data: res.report };
+        if (document.getElementById('tabBody') === body) viewReport(body, ev, tab);
+      }).catch(function (err) {
+        body.innerHTML = '<div class="card empty"><h2>Couldn\'t load</h2><p class="muted">' + esc(err.message) + '</p><button class="btn btn-primary" id="repRetry">Try again</button></div>';
+        document.getElementById('repRetry').onclick = function () { viewReport(body, ev, tab); };
+      });
+      return;
+    }
+    var r = state.report.data;
+    var refresh = '<div class="toolbar"><span></span><button class="btn btn-ghost" id="repRefresh">Refresh</button></div>';
+    var lbpTxt = function (n) { return num(Math.round(n)) + ' LBP'; };
+    var sgn = function (n, f) { n = Number(n) || 0; return n === 0 ? '<span class="good-t">0</span>' : '<span class="neg">' + (n > 0 ? '+' : '−') + f(Math.abs(n)) + '</span>'; };
+    var html = '';
+    if (tab === 'cash') {
+      var c = r.cash;
+      html = refresh +
+        '<div class="stats stats-4">' +
+        stat('Expected in drawer', money(c.expected.usd) + '<div class="sub">' + lbpTxt(c.expected.lbp) + '</div>') +
+        stat('Opening cash', money(c.opening.usd) + '<div class="sub">' + lbpTxt(c.opening.lbp) + '</div>') +
+        stat('Cash taken − given', money(c.received.usd - c.given.usd) + '<div class="sub">' + lbpTxt(c.received.lbp - c.given.lbp) + '</div>') +
+        stat('Handed over', money(c.handedOver.usd) + '<div class="sub">' + lbpTxt(c.handedOver.lbp) + '</div>') +
+        '</div><p class="small muted">Online payments so far: ' + money(c.online) + ' (never in the drawer).</p>' +
+        '<h2 class="section-title">Cash counts</h2>' +
+        (c.counts.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>When</th><th>Type</th><th>By</th><th class="num">Counted</th><th class="num">Expected</th><th class="num">Difference</th></tr></thead><tbody>' +
+          c.counts.map(function (x) {
+            return '<tr><td>' + esc(x.at) + '<div class="pref">Day ' + esc(x.day) + '</div></td><td>' + esc(x.purpose) + '</td><td>' + esc(x.by) + '</td>' +
+              '<td class="num">' + money(x.usd) + '<div class="pref">' + lbpTxt(x.lbp) + '</div></td>' +
+              '<td class="num">' + money(x.expUsd) + '<div class="pref">' + lbpTxt(x.expLbp) + '</div></td>' +
+              '<td class="num">' + sgn(x.diffUsd, money) + '<div class="pref">' + sgn(x.diffLbp, function (v) { return num(v) + ' LBP'; }) + '</div></td></tr>';
+          }).join('') + '</tbody></table></div>' : '<div class="card card-pad muted">No cash counts yet.</div>') +
+        '<h2 class="section-title">Handovers</h2>' +
+        (c.handovers.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>When</th><th>Collected by</th><th>From</th><th class="num">USD</th><th class="num">LBP</th><th>Note</th></tr></thead><tbody>' +
+          c.handovers.map(function (h) {
+            return '<tr><td>' + esc(h.at) + '</td><td><b>' + esc(h.to) + '</b></td><td>' + esc(h.by) + '</td><td class="num">' + money(h.usd) + '</td><td class="num">' + num(h.lbp) + '</td><td>' + esc(h.note) + '</td></tr>';
+          }).join('') + '</tbody></table></div>' : '<div class="card card-pad muted">No handovers yet.</div>');
+    }
+    if (tab === 'shifts') {
+      var people = {};
+      r.pay.forEach(function (d) { var p = people[d.name] = people[d.name] || { hours: 0, cost: 0, comm: 0, pay: 0 }; p.hours += d.hours; p.cost += d.hoursCost; p.comm += d.commission; p.pay += d.pay; });
+      html = refresh +
+        '<h2 class="section-title" style="margin-top:0">Totals per person</h2>' +
+        (Object.keys(people).length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>Employee</th><th class="num">Hours</th><th class="num">Hours pay</th><th class="num">Commission</th><th class="num">Total pay</th></tr></thead><tbody>' +
+          Object.keys(people).sort().map(function (n) {
+            var p = people[n];
+            return '<tr><td><b>' + esc(n) + '</b></td><td class="num">' + p.hours.toFixed(2) + '</td><td class="num">' + money(p.cost) + '</td><td class="num">' + money(p.comm) + '</td><td class="num"><b>' + money(p.pay) + '</b></td></tr>';
+          }).join('') + '</tbody></table></div>' : '<div class="card card-pad muted">No shifts or sales yet.</div>') +
+        '<h2 class="section-title">By day</h2>' +
+        (r.pay.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Employee</th><th>In – out</th><th class="num">Hours</th><th class="num">Units sold</th><th class="num">Commission</th><th class="num">Pay</th></tr></thead><tbody>' +
+          r.pay.map(function (d) {
+            return '<tr><td>' + esc(fmtDay(d.date, false)) + '</td><td><b>' + esc(d.name) + '</b>' +
+              (d.open ? '<div><span class="pill pill-ended">Not clocked out</span></div>' : '') +
+              (d.notes.length ? '<div class="small warn-text">' + esc(d.notes.join(' · ')) + '</div>' : '') + '</td>' +
+              '<td>' + (d.shifts.map(function (x) { return esc(x.in) + ' – ' + esc(x.out || '…'); }).join('<br>') || '–') + '</td>' +
+              '<td class="num">' + d.hours.toFixed(2) + '</td><td class="num">' + num(d.units) + '</td><td class="num">' + money(d.commission) + '</td><td class="num"><b>' + money(d.pay) + '</b></td></tr>';
+          }).join('') + '</tbody></table></div>' : '') +
+        '<p class="small muted">Pay = hours × hourly rate + commission (per item, on the price actually paid; returns are taken off). ' +
+        'To fix a clock-in or out time, edit the Shifts tab of the event\'s Google Sheet, then Refresh.</p>';
+    }
+    if (tab === 'days') {
+      var dv = function (v, f) { return v === '' || v == null ? '<span class="muted">–</span>' : sgn(v, f); };
+      html = refresh + (r.days.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>Day</th><th>Opened / closed</th>' +
+        '<th class="num">Cash at opening</th><th class="num">Cash at closing</th><th class="num">Cash change during day</th>' +
+        '<th class="num">Stock at opening</th><th class="num">Stock at closing</th><th class="num">Stock change during day</th><th class="num">Demo missing</th><th class="num">Sales</th></tr></thead><tbody>' +
+        r.days.map(function (d) {
+          var usd = function (v) { return money(v); }, lb = function (v) { return num(v) + ' LBP'; }, u = function (v) { return num(v) + ' units'; };
+          return '<tr><td><b>Day ' + esc(d.day) + '</b><div class="pref">' + esc(fmtDay(d.date, false)) + '</div>' + (d.status === 'Open' ? '<span class="pill pill-live">Open</span>' : '') + '</td>' +
+            '<td class="small">' + esc(String(d.openedAt).slice(11)) + ' ' + esc(d.openedBy) + '<br>' + esc(String(d.closedAt).slice(11)) + ' ' + esc(d.closedBy) + '</td>' +
+            '<td class="num">' + dv(d.openCashUsd, usd) + '<div class="pref">' + dv(d.openCashLbp, lb) + '</div></td>' +
+            '<td class="num">' + dv(d.closeCashUsd, usd) + '<div class="pref">' + dv(d.closeCashLbp, lb) + '</div></td>' +
+            '<td class="num"><b>' + dv(d.varUsd, usd) + '</b><div class="pref">' + dv(d.varLbp, lb) + '</div></td>' +
+            '<td class="num">' + dv(d.openStock, u) + '</td><td class="num">' + dv(d.closeStock, u) + '</td><td class="num"><b>' + dv(d.varStock, u) + '</b></td>' +
+            '<td class="num">' + (d.demoMissing === '' ? '–' : num(d.demoMissing)) + '</td>' +
+            '<td class="num">' + (d.sales === '' ? '–' : money(d.sales)) + '<div class="pref">' + (d.units === '' ? '' : num(d.units) + ' units') + '</div></td></tr>';
+        }).join('') + '</tbody></table></div>' +
+        '<p class="small muted">Differences compare counted with expected. "Change during day" is the difference that appeared between that day\'s opening and closing counts: a non-zero value points to the day a variance happened.</p>'
+        : '<div class="card empty"><h2>No business days yet</h2><p class="muted">Staff start and close days from the home page of the staff link.</p></div>');
+    }
+    body.innerHTML = html;
+    document.getElementById('repRefresh').onclick = function () { state.report = null; viewReport(body, ev, tab); };
+  }
+  function stat(k, v) { return '<div class="card stat"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
 
   function signed(n) { return n > 0 ? '+' + num(n) : num(n); }
 

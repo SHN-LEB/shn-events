@@ -57,7 +57,7 @@
     var token = getStaffToken(eventId);
     if (token) {
       staffTopbar(eventId, (load(dataKey(eventId), {}).event || {}).name);
-      return mount(S.app, { eventId: eventId, token: token, admin: false });
+      return mount(S.app, { eventId: eventId, token: token, admin: false, home: true });
     }
     pinScreen(eventId);
   }
@@ -131,7 +131,7 @@
         save(staffTokenKey(eventId), { token: res.token, expires: res.expires });
         document.removeEventListener('keydown', onKey);
         staffTopbar(eventId, res.event.name);
-        mount(S.app, { eventId: eventId, token: res.token, admin: false });
+        mount(S.app, { eventId: eventId, token: res.token, admin: false, home: true });
       }).catch(function (err) {
         busy = false;
         pin = '';
@@ -161,7 +161,7 @@
       admin: !!opts.admin,
       el: container,
       data: load(dataKey(opts.eventId), null),
-      view: 'products',
+      view: opts.home ? 'home' : 'products',
       pay: null,
       cart: [],
       seller: '',
@@ -229,7 +229,7 @@
       save(dataKey(pos.eventId), res.pos);
       if (!pos.admin) staffTopbar(pos.eventId, res.pos.event.name);
       if (pos.data.staff.indexOf(pos.seller) < 0) pos.seller = '';
-      if (pos.view === 'checkout') update(pos); else if (pos.view !== 'return') render(pos);
+      if (pos.view === 'checkout') update(pos); else if (pos.view === 'products' || pos.view === 'home') render(pos); else drawSync(pos);
       warmPictures(res.pos.products);
     }).catch(function (err) {
       if (current !== pos) return;
@@ -306,9 +306,13 @@
     drawSync(pos);
     var call = next.type === 'sale' ? req(pos, 'recordSale', { sale: next.sale })
       : next.type === 'return' ? req(pos, 'recordReturn', { ret: next.ret })
-        : req(pos, 'clock', { name: next.name, direction: next.direction, clientTime: next.clientTime, note: next.note || '' });
+        : next.type === 'count' ? req(pos, 'recordCount', { count: next.count })
+          : next.type === 'cash' ? req(pos, 'recordCash', { cash: next.cash })
+            : next.type === 'day' ? req(pos, 'dayAction', { day: next.day })
+              : req(pos, 'clock', { name: next.name, direction: next.direction, clientTime: next.clientTime, note: next.note || '' });
+    var answerKey = { sale: 'sale', 'return': 'sale', clock: 'openShifts', count: 'count', cash: 'cash', day: 'day' }[next.type];
     return call.then(function (res) {
-      if (!res || (next.type === 'clock' ? !res.openShifts : !res.sale)) {
+      if (!res || !res[answerKey]) {
         var e = new Error('The server answered without confirming.');
         e.offline = true;
         e.detail = next.type + ': incomplete answer (version ' + (res && res.version) + ')';
@@ -321,6 +325,7 @@
         pos.data.recentSales = [res.sale].concat((pos.data.recentSales || []).filter(function (s) { return s.id !== res.sale.id; }));
       }
       if (next.type === 'clock' && pos.data) pos.data.openShifts = res.openShifts;
+      if (next.type === 'day' && pos.data) pos.data.day = res.day;
       if (pos.data) save(dataKey(pos.eventId), pos.data);
       if (current === pos) {
         if (!q2.some(function (x) { return !x.error; })) refresh(pos);
@@ -371,6 +376,10 @@
     if (!root || !pos.data) return;
     if (pos.view === 'checkout') return renderCheckout(pos);
     if (pos.view === 'return') return renderReturn(pos);
+    if (pos.view === 'home') return renderHome(pos);
+    if (pos.view === 'clock') return renderClock(pos);
+    if (pos.view === 'count') return renderCount(pos);
+    if (pos.view === 'cash') return renderCash(pos);
     document.body.classList.remove('pos-checkout');
     var d = pos.data;
     var cats = [];
@@ -380,6 +389,7 @@
       '<div class="pos-bar">' +
       '<div class="pos-sync" id="posSync"></div>' +
       '<div class="pos-bar-actions">' +
+      (pos.admin ? '' : '<button class="btn btn-ghost btn-sm" id="posHome">‹ Home</button>') +
       '<button class="btn btn-ghost btn-sm" id="posStaff">Clock in / out</button>' +
       '<button class="btn btn-ghost btn-sm" id="posRecent">Recent sales</button>' +
       '<button class="btn btn-ghost btn-sm" id="posRefresh" title="Reload products and stock">Refresh</button>' +
@@ -402,6 +412,7 @@
       b.onclick = function () { pos.cat = b.getAttribute('data-cat'); render(pos); };
     });
     root.querySelector('#posStaff').onclick = function () { openStaff(pos); };
+    if (root.querySelector('#posHome')) root.querySelector('#posHome').onclick = function () { go(pos, 'home'); };
     root.querySelector('#posRecent').onclick = function () { openRecent(pos); };
     root.querySelector('#posRefresh').onclick = function () { S.toast('Refreshing…'); refresh(pos); flush(pos); };
     root.querySelector('#posCartBar').onclick = function () { openCheckout(pos); };
@@ -1066,41 +1077,353 @@
   }
 
   /* ---------------- clock in / out */
-  function openStaff(pos, after) {
+  /* clock in / out list, used in a page (home) or a small window (POS, checkout, counts) */
+  function staffPanel(pos, box, after, inModal) {
     var d = pos.data;
-    function html() {
-      var open = openShiftNames(pos);
-      return '<div class="pay-head"><h2>Clock in / out</h2><button class="link-btn" data-close>Done</button></div>' +
-        (d.staff.length ? '<div class="staff-list">' + d.staff.map(function (n) {
-          var since = open[n];
-          var t = since ? (String(since).indexOf('T') > 0 ? new Date(since).toTimeString().slice(0, 5) : String(since).slice(11, 16)) : '';
-          return '<div class="staff-row"><div class="sr-top"><div><b>' + S.esc(n) + '</b><div class="small muted">' + (since ? 'Clocked in at ' + t : 'Not clocked in') + '</div></div>' +
-            (since ? '<button class="btn btn-ghost" data-out="' + S.esc(n) + '">Clock out</button>'
-              : '<button class="btn btn-primary" data-in="' + S.esc(n) + '">Clock in</button>') + '</div>' +
-            '<input class="input staff-note" data-note-for="' + S.esc(n) + '" placeholder="Note for the manager (optional), e.g. arrived at 15:10">' + '</div>';
-        }).join('') + '</div>' : '<p class="muted">' + (pos.preview ? 'Still loading the staff list. Close this and try again in a moment.' : 'No staff in the event Settings tab yet.') + '</p>');
+    var open = openShiftNames(pos);
+    box.innerHTML = (inModal ? '<div class="pay-head"><h2>Clock in / out</h2><button class="link-btn" data-close>Done</button></div>' : '') +
+      (d.staff.length ? '<div class="staff-list">' + d.staff.map(function (n) {
+        var since = open[n];
+        var t = since ? (String(since).indexOf('T') > 0 ? new Date(since).toTimeString().slice(0, 5) : String(since).slice(11, 16)) : '';
+        return '<div class="staff-row"><div class="sr-top"><div><b>' + S.esc(n) + '</b><div class="small muted">' + (since ? 'Clocked in at ' + t : 'Not clocked in') + '</div></div>' +
+          (since ? '<button class="btn btn-ghost" data-out="' + S.esc(n) + '">Clock out</button>'
+            : '<button class="btn btn-primary" data-in="' + S.esc(n) + '">Clock in</button>') + '</div>' +
+          '<input class="input staff-note" data-note-for="' + S.esc(n) + '" placeholder="Note for the manager (optional), e.g. arrived at 15:10"></div>';
+      }).join('') + '</div>' : '<p class="muted">' + (pos.preview ? 'Still loading the staff list. Try again in a moment.' : 'No staff in the event Settings tab yet.') + '</p>');
+    Array.prototype.forEach.call(box.querySelectorAll('[data-in],[data-out]'), function (b) {
+      b.onclick = function () {
+        var name = b.getAttribute('data-in') || b.getAttribute('data-out');
+        var dir = b.getAttribute('data-in') ? 'in' : 'out';
+        if (dir === 'out' && !window.confirm('Clock out ' + name + '?')) return;
+        var noteEl = Array.prototype.filter.call(box.querySelectorAll('[data-note-for]'), function (x) { return x.getAttribute('data-note-for') === name; })[0];
+        enqueue(pos, { qid: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'clock', name: name, direction: dir,
+          clientTime: new Date().toISOString(), note: noteEl ? noteEl.value.trim() : '' });
+        if (dir === 'out' && pos.seller === name) pos.seller = '';
+        S.toast(name + (dir === 'in' ? ' clocked in.' : ' clocked out.'));
+        flush(pos);
+        after(name, dir);
+      };
+    });
+  }
+
+  function openStaff(pos, after) {
+    var m = modal('<div id="staffBox"></div>');
+    var box = m.el.querySelector('#staffBox');
+    function draw() {
+      staffPanel(pos, box, function (name, dir) {
+        if (after) { m.close(); after(name, dir); } else { draw(); drawCart(pos); }
+      }, true);
+      Array.prototype.forEach.call(box.querySelectorAll('[data-close]'), function (x) { x.onclick = m.close; });
     }
-    var m = modal(html());
-    function wire() {
-      Array.prototype.forEach.call(m.el.querySelectorAll('[data-in],[data-out]'), function (b) {
-        b.onclick = function () {
-          var name = b.getAttribute('data-in') || b.getAttribute('data-out');
-          var dir = b.getAttribute('data-in') ? 'in' : 'out';
-          if (dir === 'out' && !window.confirm('Clock out ' + name + '?')) return;
-          var now = new Date().toISOString();
-          var noteEl = Array.prototype.filter.call(m.el.querySelectorAll('[data-note-for]'), function (x) { return x.getAttribute('data-note-for') === name; })[0];
-          var note = noteEl ? noteEl.value.trim() : '';
-          enqueue(pos, { qid: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'clock', name: name, direction: dir, clientTime: now, note: note });
-          if (dir === 'out' && pos.seller === name) pos.seller = '';
-          m.el.querySelector('.pos-dialog').innerHTML = html();
-          Array.prototype.forEach.call(m.el.querySelectorAll('[data-close]'), function (x) { x.onclick = m.close; });
-          wire();
-          flush(pos);
-          if (after) { m.close(); after(name, dir); } else drawCart(pos);
-        };
-      });
-    }
+    draw();
+  }
+
+  /* ================================================================ staff home: POS, clock, stock count, cash count */
+  function go(pos, view) { pos.view = view; render(pos); window.scrollTo(0, 0); }
+
+  function pageTop(pos, title) {
+    return '<div class="co-top"><button class="btn btn-ghost btn-sm" data-home>‹ Home</button><h2 class="page-title">' + S.esc(title) + '</h2><span></span></div>';
+  }
+  function wireTop(pos, root) {
+    Array.prototype.forEach.call(root.querySelectorAll('[data-home]'), function (b) { b.onclick = function () { go(pos, 'home'); }; });
+  }
+
+  /* day state as the server knows it, plus what is still waiting on this phone */
+  function dayNow(pos) {
+    var d = JSON.parse(JSON.stringify(pos.data.day || { open: false, number: 0, next: 1, counts: {} }));
+    d.counts = d.counts || {};
+    queue(pos).forEach(function (x) {
+      if (x.error) return;
+      if (x.type === 'day' && x.day.action === 'open' && !d.open) { d.open = true; d.number = d.next; d.countsFor = 'Closing'; d.openedAt = x.day.clientTime; d.counts = {}; }
+      if (x.type === 'day' && x.day.action === 'close' && d.open) { d.open = false; d.next = d.number + 1; d.countsFor = 'Opening'; d.counts = {}; }
+      if (x.type === 'count' && x.count.purpose === (d.open ? 'Closing' : 'Opening')) d.counts.stock = true;
+      if (x.type === 'cash' && x.cash.kind === 'count' && x.cash.purpose === (d.open ? 'Closing' : 'Opening')) d.counts.cash = true;
+    });
+    return d;
+  }
+
+  /* expected cash = server figure + sales, returns and handovers still waiting on this phone (never shown, only compared) */
+  function expectedNow(pos) {
+    var e = pos.data.expectedCash || { usd: 0, lbp: 0 };
+    var usd = e.usd, lbp = e.lbp;
+    queue(pos).forEach(function (x) {
+      if (x.error) return;
+      if (x.type === 'sale') { usd += (x.sale.recvUsd || 0) - (x.sale.changeUsd || 0); lbp += (x.sale.recvLbp || 0) - (x.sale.changeLbp || 0); }
+      if (x.type === 'return') { usd -= x.ret.refundUsd || 0; lbp -= x.ret.refundLbp || 0; }
+      if (x.type === 'cash' && x.cash.kind === 'handover') { usd -= x.cash.usd || 0; lbp -= x.cash.lbp || 0; }
+    });
+    return { usd: r2(usd), lbp: Math.round(lbp) };
+  }
+
+  var ICONS = {
+    pos: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6h15l-1.5 9h-12z"/><path d="M6 6 5 3H2"/><circle cx="9" cy="20" r="1.4"/><circle cx="18" cy="20" r="1.4"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    count: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="m8 9 1.5 1.5L12 8M8 15l1.5 1.5L12 14M14 9h3M14 15h3"/></svg>',
+    cash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 10v4M18 10v4"/></svg>'
+  };
+
+  function renderHome(pos) {
+    document.body.classList.remove('pos-checkout');
+    var root = pos.el.querySelector('#pos');
+    var d = dayNow(pos);
+    var when = function (v) { return v ? (String(v).indexOf('T') > 0 ? new Date(v).toTimeString().slice(0, 5) : String(v).slice(11, 16)) : ''; };
+    var mark = function (ok) { return ok ? '<span class="ok">✓</span>' : '<span class="no">–</span>'; };
+    root.innerHTML =
+      '<div class="home">' +
+      '<div class="day-strip' + (d.open ? ' open' : '') + '">' +
+      '<div class="ds-main"><b>' + (d.open ? 'Day ' + d.number + ' open since ' + when(d.openedAt) : 'Day not started') + '</b>' +
+      '<div class="small">' + (d.open ? 'Closing counts' : 'Opening counts') + ': cash ' + mark(d.counts.cash) + ' · stock ' + mark(d.counts.stock) + '</div></div>' +
+      '<button class="btn ' + (d.open ? 'btn-ghost' : 'btn-primary') + ' btn-sm" id="dayBtn">' + (d.open ? 'Close day' : 'Start day') + '</button></div>' +
+      errorSlot(pos) +
+      '<div class="home-grid">' +
+      [['pos', 'POS', 'Sell, checkout, returns'], ['clock', 'Clock in / out', 'Start and end your shift'],
+        ['count', 'Stock count', 'Count products and demos'], ['cash', 'Cash count', 'Count the drawer, handovers']].map(function (b) {
+        return '<button class="home-box" data-go="' + b[0] + '">' + ICONS[b[0]] + '<b>' + b[1] + '</b><span>' + b[2] + '</span></button>';
+      }).join('') + '</div>' +
+      '<div class="home-foot"><span id="posSync"></span></div></div>';
+    Array.prototype.forEach.call(root.querySelectorAll('[data-go]'), function (b) {
+      b.onclick = function () { var v = b.getAttribute('data-go'); go(pos, v === 'pos' ? 'products' : v); };
+    });
+    root.querySelector('#dayBtn').onclick = function () { openDayDialog(pos); };
+    wireErrorSlot(pos, root);
+    drawSync(pos);
+  }
+
+  function namePicker(pos, selected, id) {
+    var open = openShiftNames(pos);
+    var names = pos.data.staff.filter(function (n) { return open[n]; });
+    return '<div class="sellers" id="' + id + '">' + names.map(function (n) {
+      return '<button class="seller' + (selected === n ? ' active' : '') + '" data-pick="' + S.esc(n) + '">' + S.esc(n) + '</button>';
+    }).join('') + '<button class="seller add" data-clockin>+ Clock in</button></div>' +
+      (names.length ? '' : '<div class="small muted" style="margin-top:6px">Nobody is clocked in yet.</div>');
+  }
+  function wirePicker(pos, root, onPick, onReRender) {
+    Array.prototype.forEach.call(root.querySelectorAll('[data-pick]'), function (b) {
+      b.onclick = function () {
+        Array.prototype.forEach.call(root.querySelectorAll('[data-pick]'), function (x) { x.classList.toggle('active', x === b); });
+        onPick(b.getAttribute('data-pick'));
+      };
+    });
+    var c = root.querySelector('[data-clockin]');
+    if (c) c.onclick = function () { openStaff(pos, function (name, dir) { if (dir === 'in') onPick(name); onReRender(); }); };
+  }
+
+  function openDayDialog(pos) {
+    var d = dayNow(pos);
+    var action = d.open ? 'close' : 'open';
+    var who = '';
+    var missing = [];
+    if (!d.counts.cash) missing.push('cash');
+    if (!d.counts.stock) missing.push('stock');
+    var m = modal(
+      '<div class="pay-head"><h2>' + (d.open ? 'Close day ' + d.number : 'Start day ' + d.next) + '</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      (missing.length
+        ? '<div class="pay-status owed"><span>No ' + (d.open ? 'closing' : 'opening') + ' ' + missing.join(' or ') + ' count yet. You can still ' + (d.open ? 'close' : 'start') + ' the day, but the report will have gaps.</span></div>'
+        : '<div class="pay-status good"><span>Cash and stock counted. Ready.</span></div>') +
+      '<h3 class="rs-title">Who is ' + (d.open ? 'closing' : 'starting') + ' the day?</h3><div id="dayWho">' + namePicker(pos, '', 'dayNames') + '</div>' +
+      '<div id="dayErr"></div>' +
+      '<button class="btn btn-accent btn-big btn-block" id="dayGo">' + (d.open ? 'Close day' : 'Start day') + '</button>');
+    function wire() { wirePicker(pos, m.el, function (n) { who = n; }, function () { m.el.querySelector('#dayWho').innerHTML = namePicker(pos, who, 'dayNames'); wire(); }); }
     wire();
+    m.el.querySelector('#dayGo').onclick = function () {
+      if (!who) { m.el.querySelector('#dayErr').innerHTML = '<div class="form-error">Pick your name.</div>'; return; }
+      enqueue(pos, { qid: 'D' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'day', day: { action: action, by: who, clientTime: new Date().toISOString() } });
+      m.close();
+      S.toast(action === 'open' ? 'Day started.' : 'Day closed. The report is in the event sheet (Days tab).');
+      render(pos);
+      flush(pos);
+    };
+  }
+
+  /* ---------------- clock in / out page */
+  function renderClock(pos) {
+    var root = pos.el.querySelector('#pos');
+    root.innerHTML = '<div class="co">' + pageTop(pos, 'Clock in / out') + '<section class="co-card" id="clockBody"></section></div>';
+    wireTop(pos, root);
+    staffPanel(pos, root.querySelector('#clockBody'), function () { renderClock(pos); });
+  }
+
+  /* ---------------- purpose of a count */
+  function purposeHtml(pos, current) {
+    var d = dayNow(pos);
+    if (!d.open) return '<div class="purpose"><span class="pill pill-upcoming">Opening count</span> <span class="small muted">Before Start day</span></div>';
+    return '<div class="seg seg2" id="purposeSeg">' + [['Spot', 'Spot check'], ['Closing', 'Closing count']].map(function (x) {
+      return '<button data-purpose="' + x[0] + '" class="' + (current === x[0] ? 'active' : '') + '">' + x[1] + '</button>';
+    }).join('') + '</div>';
+  }
+  function purposeOf(pos, chosen) { return dayNow(pos).open ? (chosen || 'Spot') : 'Opening'; }
+  function wirePurpose(root, st) {
+    Array.prototype.forEach.call(root.querySelectorAll('[data-purpose]'), function (b) {
+      b.onclick = function () {
+        st.purpose = b.getAttribute('data-purpose');
+        Array.prototype.forEach.call(root.querySelectorAll('[data-purpose]'), function (x) { x.classList.toggle('active', x === b); });
+      };
+    });
+  }
+
+  /* ---------------- stock count page */
+  function renderCount(pos) {
+    var root = pos.el.querySelector('#pos');
+    var st = pos.countState = pos.countState || { purpose: 'Spot', by: '', values: {} };
+    var pend = pendingQty(pos);
+    var prods = pos.data.products;
+    root.innerHTML = '<div class="co count-page">' + pageTop(pos, 'Stock count') +
+      '<section class="co-card">' + purposeHtml(pos, st.purpose) + '</section>' +
+      '<section class="co-card"><table class="count-tbl"><thead><tr><th>Product</th><th>Sellable</th><th>Demo</th><th></th></tr></thead><tbody>' +
+      prods.map(function (p, i) {
+        var v = st.values[p.ref] || {};
+        return '<tr data-ref="' + S.esc(p.ref) + '"><td class="ct-name">' + S.esc(p.name) + '</td>' +
+          '<td><input class="input ct-in" data-k="s" data-i="' + i + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(v.s == null ? '' : v.s) + '"></td>' +
+          '<td>' + (p.demo ? '<input class="input ct-in" data-k="d" data-i="' + i + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(v.d == null ? '' : v.d) + '">' : '<span class="muted small">–</span>') + '</td>' +
+          '<td class="ct-mark"></td></tr>';
+      }).join('') + '</tbody></table></section>' +
+      '<section class="co-card"><h3>Counted by <span class="req">required</span></h3><div id="countWho">' + namePicker(pos, st.by, 'countNames') + '</div></section>' +
+      '<div id="countErr"></div><button class="btn btn-accent btn-big btn-block" id="countSave">Save count</button></div>';
+    wireTop(pos, root);
+    wirePurpose(root, st);
+    function wireWho() { wirePicker(pos, root, function (n) { st.by = n; }, function () { root.querySelector('#countWho').innerHTML = namePicker(pos, st.by, 'countNames'); wireWho(); }); }
+    wireWho();
+    var inputs = Array.prototype.slice.call(root.querySelectorAll('.ct-in'));
+    function mark(tr) {
+      var ref = tr.getAttribute('data-ref');
+      var p = product(pos, ref), v = st.values[ref] || {};
+      var cell = tr.querySelector('.ct-mark');
+      var parts = [];
+      var expS = p.live - (pend[ref] || 0), expD = p.demo || 0;
+      if (v.s !== undefined && v.s !== '') { var ds = Number(v.s) - expS; parts.push(ds === 0 ? '' : (ds > 0 ? '+' : '') + ds); }
+      if (v.d !== undefined && v.d !== '') { var dd = Number(v.d) - expD; parts.push(dd === 0 ? '' : 'demo ' + (dd > 0 ? '+' : '') + dd); }
+      if (!parts.length) { cell.innerHTML = ''; return; }
+      var bad = parts.filter(Boolean);
+      cell.innerHTML = bad.length ? '<span class="ct-bad">✗ ' + S.esc(bad.join(' · ')) + '</span>' : '<span class="ct-ok">✓</span>';
+    }
+    inputs.forEach(function (inp, k) {
+      inp.addEventListener('input', function () {
+        var tr = inp.closest('tr'), ref = tr.getAttribute('data-ref');
+        st.values[ref] = st.values[ref] || {};
+        st.values[ref][inp.getAttribute('data-k')] = inp.value.replace(/[^0-9]/g, '');
+        mark(tr);
+      });
+      inp.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); var next = inputs[k + 1]; if (next) { next.focus(); next.select(); } else inp.blur(); }
+      });
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('tbody tr'), mark);
+    keepAboveKeyboard(root);
+    root.querySelector('#countSave').onclick = function () {
+      var lines = Object.keys(st.values).map(function (ref) {
+        var v = st.values[ref];
+        return { ref: ref, sellable: v.s === '' || v.s == null ? '' : Number(v.s), demo: v.d === '' || v.d == null ? '' : Number(v.d) };
+      }).filter(function (l) { return l.sellable !== '' || l.demo !== ''; });
+      var err = !lines.length ? 'Enter at least one quantity.' : !st.by ? 'Pick who counted.' : '';
+      if (err) { root.querySelector('#countErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
+      var off = Array.prototype.filter.call(root.querySelectorAll('.ct-bad'), function () { return true; }).length;
+      var count = { id: 'K' + newSaleId().slice(1), countedBy: st.by, purpose: purposeOf(pos, st.purpose), lines: lines, clientTime: new Date().toISOString() };
+      enqueue(pos, { qid: count.id, type: 'count', count: count });
+      pos.countState = null;
+      S.toast('Count saved: ' + lines.length + ' product' + (lines.length === 1 ? '' : 's') + (off ? ', ' + off + ' with a variance.' : ', all correct.'));
+      go(pos, 'home');
+      flush(pos);
+    };
+  }
+
+  /* ---------------- cash count page (banknotes) + handovers */
+  var USD_NOTES = [100, 50, 20, 10, 5, 1];
+  var LBP_NOTES = [100000, 50000, 20000, 10000, 5000, 1000];
+
+  function renderCash(pos) {
+    var root = pos.el.querySelector('#pos');
+    var st = pos.cashState = pos.cashState || { purpose: 'Spot', by: '', usd: {}, lbp: {}, result: null };
+    function rows(cur, notes) {
+      return notes.map(function (n) {
+        var q = st[cur][n] || '';
+        return '<tr><td class="cn-note">' + (cur === 'usd' ? '$' + n : S.num(n)) + '</td><td>×</td>' +
+          '<td><input class="input ct-in cn-in" data-cur="' + cur + '" data-note="' + n + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(q) + '"></td>' +
+          '<td class="cn-sub" data-sub="' + cur + n + '"></td></tr>';
+      }).join('');
+    }
+    root.innerHTML = '<div class="co cash-page">' + pageTop(pos, 'Cash count') +
+      '<section class="co-card">' + purposeHtml(pos, st.purpose) +
+      '<button class="btn btn-ghost btn-block" id="handoverBtn" style="margin-top:10px">Submit a handover</button></section>' +
+      '<section class="co-card"><div class="cash-cols">' +
+      '<div><h3>USD</h3><table class="count-tbl cn-tbl"><tbody>' + rows('usd', USD_NOTES) + '</tbody></table><div class="cn-total">Total <b id="totUsd"></b></div></div>' +
+      '<div><h3>LBP</h3><table class="count-tbl cn-tbl"><tbody>' + rows('lbp', LBP_NOTES) + '</tbody></table><div class="cn-total">Total <b id="totLbp"></b></div></div>' +
+      '</div></section>' +
+      '<section class="co-card"><h3>Counted by <span class="req">required</span></h3><div id="cashWho">' + namePicker(pos, st.by, 'cashNames') + '</div></section>' +
+      '<div id="cashResult"></div><div id="cashErr"></div>' +
+      '<button class="btn btn-accent btn-big btn-block" id="cashSave">Check &amp; save count</button></div>';
+    wireTop(pos, root);
+    wirePurpose(root, st);
+    function wireWho() { wirePicker(pos, root, function (n) { st.by = n; }, function () { root.querySelector('#cashWho').innerHTML = namePicker(pos, st.by, 'cashNames'); wireWho(); }); }
+    wireWho();
+    function totals2() {
+      var u = 0, l = 0;
+      USD_NOTES.forEach(function (n) { u += n * (Number(st.usd[n]) || 0); });
+      LBP_NOTES.forEach(function (n) { l += n * (Number(st.lbp[n]) || 0); });
+      return { usd: u, lbp: l };
+    }
+    function draw() {
+      USD_NOTES.forEach(function (n) { root.querySelector('[data-sub="usd' + n + '"]').textContent = st.usd[n] ? '$' + S.num(n * st.usd[n]) : ''; });
+      LBP_NOTES.forEach(function (n) { root.querySelector('[data-sub="lbp' + n + '"]').textContent = st.lbp[n] ? S.num(n * st.lbp[n]) : ''; });
+      var t = totals2();
+      root.querySelector('#totUsd').textContent = S.money(t.usd);
+      root.querySelector('#totLbp').textContent = lbp(t.lbp);
+    }
+    var inputs = Array.prototype.slice.call(root.querySelectorAll('.cn-in'));
+    inputs.forEach(function (inp, k) {
+      inp.addEventListener('input', function () {
+        inp.value = inp.value.replace(/[^0-9]/g, '');
+        st[inp.getAttribute('data-cur')][inp.getAttribute('data-note')] = inp.value;
+        root.querySelector('#cashResult').innerHTML = '';
+        draw();
+      });
+      inp.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); var next = inputs[k + 1]; if (next) { next.focus(); next.select(); } else inp.blur(); }
+      });
+    });
+    draw();
+    keepAboveKeyboard(root);
+    root.querySelector('#handoverBtn').onclick = function () { openHandover(pos); };
+    root.querySelector('#cashSave').onclick = function () {
+      if (!st.by) { root.querySelector('#cashErr').innerHTML = '<div class="form-error">Pick who counted.</div>'; return; }
+      root.querySelector('#cashErr').innerHTML = '';
+      var t = totals2();
+      var exp = expectedNow(pos);
+      var du = r2(t.usd - exp.usd), dl = t.lbp - exp.lbp;
+      var cash = { id: 'M' + newSaleId().slice(1), kind: 'count', by: st.by, usd: t.usd, lbp: t.lbp, purpose: purposeOf(pos, st.purpose),
+        banknotes: { usd: st.usd, lbp: st.lbp }, clientTime: new Date().toISOString() };
+      enqueue(pos, { qid: cash.id, type: 'cash', cash: cash });
+      flush(pos);
+      var correct = Math.abs(du) < 0.005 && dl === 0;
+      root.querySelector('#cashResult').innerHTML = correct
+        ? '<div class="cash-res good">✓ Correct</div>'
+        : '<div class="cash-res bad">✗ Variance: ' + [du ? 'USD ' + (du > 0 ? '+' : '−') + S.money(Math.abs(du)) : '', dl ? 'LBP ' + (dl > 0 ? '+' : '−') + S.num(Math.abs(dl)) : ''].filter(Boolean).join(' · ') + '</div>';
+      root.querySelector('#cashSave').textContent = 'Saved. Back to home';
+      root.querySelector('#cashSave').onclick = function () { pos.cashState = null; go(pos, 'home'); };
+    };
+  }
+
+  function openHandover(pos) {
+    var m = modal(
+      '<div class="pay-head"><h2>Cash handover</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<div class="two"><div class="field"><label for="hoUsd">Amount USD</label><input class="input money-in" id="hoUsd" inputmode="decimal" placeholder="0"></div>' +
+      '<div class="field"><label for="hoLbp">Amount LBP</label><input class="input money-in" id="hoLbp" inputmode="numeric" placeholder="0"></div></div>' +
+      '<div class="field"><label for="hoTo">Collected by</label><input class="input" id="hoTo" placeholder="Name of the person taking the cash"></div>' +
+      '<div class="field"><label for="hoNote">Note (optional)</label><input class="input" id="hoNote"></div>' +
+      '<div id="hoErr"></div><button class="btn btn-accent btn-big btn-block" id="hoSave">Submit handover</button>');
+    var $ = function (sel) { return m.el.querySelector(sel); };
+    liveCommas($('#hoLbp'), function () {});
+    $('#hoSave').onclick = function () {
+      var usd = parseNum($('#hoUsd').value), l = Math.round(parseNum($('#hoLbp').value)), to = $('#hoTo').value.trim();
+      var err = !usd && !l ? 'Enter the amount handed over.' : !to ? 'Who collected the cash?' : '';
+      if (err) { $('#hoErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
+      var open = openShiftNames(pos);
+      var by = pos.data.staff.filter(function (n) { return open[n]; }).join(', ');
+      var cash = { id: 'H' + newSaleId().slice(1), kind: 'handover', by: by, to: to, usd: usd, lbp: l, note: $('#hoNote').value.trim(), clientTime: new Date().toISOString() };
+      enqueue(pos, { qid: cash.id, type: 'cash', cash: cash });
+      m.close();
+      S.toast('Handover saved: ' + [usd ? S.money(usd) : '', l ? lbp(l) : ''].filter(Boolean).join(' + ') + ' to ' + to + '.');
+      flush(pos);
+    };
   }
 
   /* ---------------- recent sales */
@@ -1141,7 +1464,8 @@
     var m = modal(
       '<div class="pay-head"><h2>Recent sales</h2><button class="link-btn" data-close>Close</button></div>' +
       (failed.length ? '<h3 class="rs-title neg">Not saved</h3>' + failed.map(function (x) {
-        return row(x.type === 'clock' ? { total: 0, method: 'Clock ' + x.direction, seller: x.name, lines: [] } : pendingRow(x),
+        var label = { clock: 'Clock ' + x.direction, count: 'Stock count', cash: x.cash && x.cash.kind === 'handover' ? 'Handover' : 'Cash count', day: 'Day ' + (x.day && x.day.action) }[x.type];
+        return row(label ? { total: 0, method: label, seller: x.name || (x.count && x.count.countedBy) || (x.cash && x.cash.by) || (x.day && x.day.by) || '', lines: [] } : pendingRow(x),
           '<div><div class="small neg">' + S.esc(x.error) + '</div><button class="btn btn-ghost btn-sm" data-discard="' + S.esc(x.qid) + '">Discard</button></div>');
       }).join('') : '') +
       (waiting.length ? '<h3 class="rs-title">Waiting to send</h3>' + waiting.map(function (x) { return row(pendingRow(x)); }).join('') : '') +
