@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -32,6 +32,7 @@ const MASTER_SETTINGS = [
   ['DEFAULT_MAX_DISCOUNT_PCT', 20, 'Highest discount % a cashier can enter, copied into each new event'],
   ['DEFAULT_OPENING_CASH_USD', 0, 'Copied into each new event'],
   ['DEFAULT_OPENING_CASH_LBP', 0, 'Copied into each new event'],
+  ['WHISH_PAY_LINK', 'https://whish.money/app/pay/WttWZdc0D', 'Link inside the Whish QR code shown for online payments. Paste a new link to change the QR; leave empty to hide the Whish button'],
   ['SHOP_DOMAIN', 'superheatedneurons.com', 'Website the POS takes product pictures from (matched by SKU = Ref Code)'],
   ['EVENT_EXCLUDED_PRODUCT_LINES', 'Accessories, (Blank), CTT, Display Stands, Events, Giant Games, Merchandizing, Ops, Rebates', 'Catalogue product lines left out of event catalogues. Comma separated; (Blank) = no product line']
 ];
@@ -180,7 +181,7 @@ function route_(req) {
     case 'posCatalog': return { catalog: posCatalog_(req.eventId) };
     case 'posData': requireEventAccess_(req, req.eventId); return { pos: posData_(req.eventId, isAdmin_(req)) };
     case 'recordSale': requireEventAccess_(req, req.eventId); return { sale: recordSale_(req.eventId, req.sale) };
-    case 'clock': requireEventAccess_(req, req.eventId); return { openShifts: clock_(req.eventId, req.name, req.direction, req.clientTime) };
+    case 'clock': requireEventAccess_(req, req.eventId); return { openShifts: clock_(req.eventId, req.name, req.direction, req.clientTime, req.note) };
     case 'voidSale': requireAdmin_(req); return { sale: voidSale_(req.eventId, req.saleId, req.reason) };
     case 'recordReturn': requireEventAccess_(req, req.eventId); return { sale: recordReturn_(req.eventId, req.ret) };
     case 'logError': logError_(req.error || {}); return {};
@@ -848,6 +849,7 @@ function posData_(id, admin) {
     fxRate: Number(s['Exchange Rate (LBP per USD)']) || 0,
     maxDiscountPct: Number(s['Max Discount %']) || 0,
     lbpStep: LBP_STEP,
+    whishLink: String(masterSetting_('WHISH_PAY_LINK') || '').trim(),
     staff: activeStaffNames_(ss),
     openShifts: openShifts_(ss),
     products: products,
@@ -884,25 +886,42 @@ function recordSale_(id, sale) {
 
     const items = {};
     getInventory_(id).items.forEach(function (it) { items[it.ref] = it; });
-    const qtyByRef = {};
-    const refs = [];
+    const orderDisc = Number(sale.discountPct || 0);
+    if (!(orderDisc >= 0 && orderDisc <= maxDisc)) throw userError_('The discount is above the ' + maxDisc + '% allowed for this event.', 'invalid');
+    // lines: the same product can appear twice (e.g. 1 discounted + 1 at full price); identical lines are merged
+    const lines = [];
     (sale.lines || []).forEach(function (l) {
       const ref = String(l.ref || '');
       const q = Math.round(Number(l.qty));
       if (!items[ref]) throw userError_('A product in this sale is not in the event listing anymore.', 'invalid');
       if (!(q >= 1 && q <= 999)) throw userError_('Check the quantities.', 'invalid');
-      if (!qtyByRef[ref]) { qtyByRef[ref] = 0; refs.push(ref); }
-      qtyByRef[ref] += q;
+      const d = orderDisc > 0 ? 0 : Number(l.discountPct || 0); // an order discount replaces item discounts
+      if (!(d >= 0 && d <= maxDisc)) throw userError_('The discount on "' + items[ref].name + '" is above the ' + maxDisc + '% allowed.', 'invalid');
+      const round = d > 0 && l.roundDown !== false;
+      const note = d > 0 ? String(l.note || '').slice(0, 120) : '';
+      const same = lines.filter(function (x) { return x.ref === ref && x.disc === d && x.round === round && x.note === note; })[0];
+      if (same) same.qty += q;
+      else lines.push({ ref: ref, qty: q, disc: d, round: round, note: note });
     });
-    if (!refs.length) throw userError_('The sale has no products.', 'invalid');
-
-    const disc = Number(sale.discountPct || 0);
-    if (!(disc >= 0 && disc <= maxDisc)) throw userError_('The discount is above the ' + maxDisc + '% allowed for this event.', 'invalid');
-
-    const gross = refs.map(function (r) { return items[r].price * qtyByRef[r]; });
-    const lineTotals = gross.map(function (g) { return round2_(g * (1 - disc / 100)); });
-    const total = round2_(gross.reduce(function (a, b) { return a + b; }, 0) * (1 - disc / 100));
-    lineTotals[lineTotals.length - 1] = round2_(lineTotals[lineTotals.length - 1] + total - lineTotals.reduce(function (a, b) { return a + b; }, 0));
+    if (!lines.length) throw userError_('The sale has no products.', 'invalid');
+    lines.forEach(function (l) {
+      const gross = items[l.ref].price * l.qty;
+      l.total = l.disc > 0 ? (l.round ? Math.floor(round2_(gross * (1 - l.disc / 100))) : round2_(gross * (1 - l.disc / 100))) : round2_(gross);
+      l.pct = l.disc;
+    });
+    let total = round2_(lines.reduce(function (a, l) { return a + l.total; }, 0));
+    if (orderDisc > 0) {
+      const target = round2_(total * (1 - orderDisc / 100));
+      const newTotal = sale.roundTotal !== false ? Math.floor(target) : target;
+      // spread the order discount over the lines, the last line takes the cents
+      let acc = 0;
+      lines.forEach(function (l, i) {
+        if (i < lines.length - 1) { l.total = round2_(l.total * newTotal / total); acc = round2_(acc + l.total); }
+        else l.total = round2_(newTotal - acc);
+        l.pct = orderDisc;
+      });
+      total = round2_(newTotal);
+    }
 
     const method = sale.method;
     if (['Cash', 'Online', 'Split'].indexOf(method) < 0) throw userError_('Pick how the customer paid.', 'invalid');
@@ -924,7 +943,8 @@ function recordSale_(id, sale) {
       if (paid < cashDue - tolerance) throw userError_('The cash received is less than the amount due.', 'invalid');
       const changeDue = paid - cashDue;
       rounding = round2_(changeDue - changeUsd - changeLbp / fx);
-      if (Math.abs(rounding) > 1 + tolerance) throw userError_('The change given does not match the change due.', 'invalid');
+      if (rounding < -tolerance) throw userError_('More change was given than due.', 'invalid');
+      if (rounding > tolerance) throw userError_('Not enough change was given.', 'invalid');
     }
 
     const t = when_(sale.clientTime);
@@ -932,12 +952,13 @@ function recordSale_(id, sale) {
     const time = Utilities.formatDate(t, tz_(), 'HH:mm');
     const loggedAt = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm:ss');
     const note = String(sale.note || '').slice(0, 200);
-    const rows = refs.map(function (ref, i) {
-      const it = items[ref];
+    const rows = lines.map(function (l, i) {
+      const it = items[l.ref];
       const first = i === 0;
-      return [saleId, i + 1, date, time, seller, ref, it.name, it.category, qtyByRef[ref], it.price, disc, lineTotals[i],
+      const lineNote = [first ? note : '', l.note].filter(Boolean).join(' | ');
+      return [saleId, i + 1, date, time, seller, l.ref, it.name, it.category, l.qty, it.price, l.pct, l.total,
         method, first ? online : '', first ? recvUsd : '', first ? recvLbp : '', first ? changeUsd : '', first ? changeLbp : '',
-        first ? rounding : '', round2_(lineTotals[i] * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt, first ? note : ''];
+        first ? rounding : '', round2_(l.total * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt, lineNote];
     });
     const start = salesSheet.getLastRow() + 1;
     salesSheet.getRange(start, 1, rows.length, 3).setNumberFormat('@');
@@ -999,7 +1020,7 @@ function recordReturn_(id, ret) {
       refundUsd = Math.max(0, Number(ret.refundUsd) || 0);
       refundLbp = Math.max(0, Math.round(Number(ret.refundLbp) || 0));
       rounding = round2_(due - refundUsd - refundLbp / fx);
-      if (Math.abs(rounding) > 1 + LBP_STEP / fx + 0.005) throw userError_('The refund given does not match the amount due.', 'invalid');
+      if (Math.abs(rounding) > LBP_STEP / fx + 0.005) throw userError_('The refund given does not match the amount due.', 'invalid');
     }
     const t = when_(ret.clientTime);
     const date = Utilities.formatDate(t, tz_(), 'yyyy-MM-dd');
@@ -1041,7 +1062,8 @@ function logError_(e) {
     clip(e.device, 200), clip(e.version || APP_VERSION, 20), clip(e.message, 500), clip(e.details, 2000)]);
 }
 
-function clock_(id, name, direction, clientTime) {
+function clock_(id, name, direction, clientTime, note) {
+  note = String(note || '').trim().slice(0, 200);
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
@@ -1063,7 +1085,7 @@ function clock_(id, name, direction, clientTime) {
     if (direction === 'in') {
       if (openRow < 0) {
         const r = sh.getLastRow() + 1;
-        sh.getRange(r, 1, 1, 6).setNumberFormat('@').setValues([[Utilities.formatDate(t, tz_(), 'yyyy-MM-dd'), name, stamp, '', '', '']]);
+        sh.getRange(r, 1, 1, 6).setNumberFormat('@').setValues([[Utilities.formatDate(t, tz_(), 'yyyy-MM-dd'), name, stamp, '', '', note ? 'In: ' + note : '']]);
       }
     } else if (direction === 'out') {
       if (openRow >= 0) {
@@ -1071,7 +1093,8 @@ function clock_(id, name, direction, clientTime) {
         try { start = Utilities.parseDate(String(rows[openRow][2]), tz_(), 'yyyy-MM-dd HH:mm'); } catch (e) { start = null; }
         const end = Utilities.parseDate(stamp, tz_(), 'yyyy-MM-dd HH:mm');
         const hours = start ? round2_(Math.max(0, (end - start) / 3600000)) : '';
-        sh.getRange(openRow + 1, 4, 1, 2).setValues([[stamp, hours]]);
+        const prev = String(rows[openRow][5] || '');
+        sh.getRange(openRow + 1, 4, 1, 3).setValues([[stamp, hours, note ? [prev, 'Out: ' + note].filter(Boolean).join(' | ') : prev]]);
       }
     } else {
       throw userError_('Clock in or out?', 'invalid');

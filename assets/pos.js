@@ -306,7 +306,7 @@
     drawSync(pos);
     var call = next.type === 'sale' ? req(pos, 'recordSale', { sale: next.sale })
       : next.type === 'return' ? req(pos, 'recordReturn', { ret: next.ret })
-        : req(pos, 'clock', { name: next.name, direction: next.direction, clientTime: next.clientTime });
+        : req(pos, 'clock', { name: next.name, direction: next.direction, clientTime: next.clientTime, note: next.note || '' });
     return call.then(function (res) {
       if (!res || (next.type === 'clock' ? !res.openShifts : !res.sale)) {
         var e = new Error('The server answered without confirming.');
@@ -429,27 +429,27 @@
   function hasStock(p) { return typeof p.live === 'number'; }
   function stockOf(pos, p, pend) { return p.live - (pend[p.ref] || 0) - inCart(pos, p.ref); }
   function inCart(pos, ref) {
-    var l = pos.cart.filter(function (x) { return x.ref === ref; })[0];
-    return l ? l.qty : 0;
+    return pos.cart.reduce(function (a, x) { return a + (x.ref === ref ? x.qty : 0); }, 0);
   }
 
   function tileInner(pos, p, pend) {
     var n = inCart(pos, p.ref);
-    var known = hasStock(p);
-    var left = known ? stockOf(pos, p, pend) : null;
     var pic = picUrl(p.picture);
     return '<span class="tile-img">' + (pic
-        ? '<img src="' + S.esc(pic) + '" alt="" loading="lazy" onerror="this.parentNode.innerHTML=\'<span class=&quot;ph&quot;>' + S.esc(initials(p.name)) + '</span>\'">'
-        : '<span class="ph">' + S.esc(initials(p.name)) + '</span>') + '</span>' +
+        ? '<img src="' + S.esc(pic) + '" alt="" loading="lazy" onerror="this.parentNode.querySelector(\'.ph\').hidden=false;this.remove()">'
+        : '') + '<span class="ph"' + (pic ? ' hidden' : '') + '>' + S.esc(initials(p.name)) + '</span>' +
+      '<span class="tile-qty-wrap">' + tileQty(n, p.ref) + '</span></span>' +
       '<span class="tile-name">' + S.esc(p.name) + '</span>' +
-      '<span class="tile-bottom"><span class="tile-price">' + S.money(p.price) + '</span>' +
-      '<span class="tile-act">' + tileAct(n, known, left, p.ref) + '</span></span>';
+      '<span class="tile-row"><span class="tile-price">' + S.money(p.price) + '</span><span class="tile-stock">' + stockText(pos, p, pend) + '</span></span>';
   }
-  function tileAct(n, known, left, ref) {
-    return n
-      ? '<span class="tile-qty"><button class="tq" data-dec="' + S.esc(ref) + '" aria-label="One less">−</button><b>' + n + '</b>' +
-        '<button class="tq" data-inc="' + S.esc(ref) + '" aria-label="One more">+</button></span>'
-      : '<span class="tile-stock">' + (known ? (left <= 0 ? 'None left' : left + ' left') : '') + '</span>';
+  function stockText(pos, p, pend) {
+    if (!hasStock(p)) return '';
+    var left = stockOf(pos, p, pend);
+    return left <= 0 ? '0 left' : left + ' left';
+  }
+  function tileQty(n, ref) {
+    return n ? '<span class="tile-qty"><button class="tq" data-dec="' + S.esc(ref) + '" aria-label="One less">−</button><b>' + n + '</b>' +
+      '<button class="tq" data-inc="' + S.esc(ref) + '" aria-label="One more">+</button></span>' : '';
   }
   function tileClass(pos, p, pend) {
     var n = inCart(pos, p.ref);
@@ -492,13 +492,18 @@
     var pend = pendingQty(pos);
     var n = inCart(pos, ref);
     el.className = tileClass(pos, p, pend);
-    el.querySelector('.tile-act').innerHTML = tileAct(n, hasStock(p), hasStock(p) ? stockOf(pos, p, pend) : null, ref);
+    el.querySelector('.tile-qty-wrap').innerHTML = tileQty(n, ref);
+    el.querySelector('.tile-stock').textContent = stockText(pos, p, pend);
   }
 
   function product(pos, ref) {
     return pos.data.products.filter(function (p) { return p.ref === ref; })[0];
   }
 
+  var lineSeq = 0;
+  function newLine(ref, qty) { return { key: 'L' + (++lineSeq), ref: ref, qty: qty, disc: 0, round: true, note: '' }; }
+
+  /* from a tile: works on the full-price line of that product */
   function addToCart(pos, ref, delta) {
     delta = delta || 1;
     var p = product(pos, ref);
@@ -506,21 +511,111 @@
     if (delta > 0 && hasStock(p) && stockOf(pos, p, pendingQty(pos)) <= 0) {
       if (!window.confirm('"' + p.name + '" shows no stock left. Add it anyway?')) return;
     }
-    var line = pos.cart.filter(function (l) { return l.ref === ref; })[0];
-    if (!line) { line = { ref: ref, qty: 0 }; pos.cart.push(line); }
+    var line = pos.cart.filter(function (l) { return l.ref === ref && !l.disc; })[0];
+    if (!line && delta < 0) line = pos.cart.filter(function (l) { return l.ref === ref; }).pop();
+    if (!line) { if (delta < 0) return; line = newLine(ref, 0); pos.cart.push(line); }
     line.qty += delta;
+    afterCartChange(pos, ref);
+  }
+
+  /* from the checkout: works on one line */
+  function changeLine(pos, key, delta) {
+    var line = pos.cart.filter(function (l) { return l.key === key; })[0];
+    if (!line) return;
+    if (delta > 0) {
+      var p = product(pos, line.ref);
+      if (p && hasStock(p) && stockOf(pos, p, pendingQty(pos)) <= 0 && !window.confirm('"' + p.name + '" shows no stock left. Add it anyway?')) return;
+    }
+    line.qty += delta;
+    afterCartChange(pos, line.ref);
+  }
+
+  function afterCartChange(pos, ref) {
     pos.cart = pos.cart.filter(function (l) { return l.qty > 0; });
     if (pos.view === 'checkout') { if (!pos.cart.length) closeCheckout(pos); else renderCheckout(pos); return; }
     updateTile(pos, ref);
     drawCart(pos);
   }
 
+  /* same maths as the server: item discounts (optionally rounded down), or one order discount that replaces them */
+  function lineTotal(pos, l, ignoreItemDisc) {
+    var p = product(pos, l.ref);
+    if (!p) return 0;
+    var gross = p.price * l.qty;
+    if (ignoreItemDisc || !l.disc) return r2(gross);
+    var t = r2(gross * (1 - l.disc / 100));
+    return l.round ? Math.floor(t) : t;
+  }
+
   function totals(pos) {
-    var sub = 0;
-    pos.cart.forEach(function (l) { var p = product(pos, l.ref); if (p) sub += p.price * l.qty; });
-    var disc = parseNum(pos.discount);
-    var total = r2(sub * (1 - disc / 100));
-    return { sub: r2(sub), disc: disc, off: r2(sub - total), total: total, units: pos.cart.reduce(function (a, l) { return a + l.qty; }, 0) };
+    var sub = 0, afterItems = 0;
+    var order = parseNum(pos.discount);
+    pos.cart.forEach(function (l) { var p = product(pos, l.ref); if (p) sub += p.price * l.qty; afterItems += lineTotal(pos, l, order > 0); });
+    sub = r2(sub); afterItems = r2(afterItems);
+    var total = afterItems;
+    if (order > 0) { total = r2(afterItems * (1 - order / 100)); if (pos.roundOrder !== false) total = Math.floor(total); }
+    var maxItem = pos.cart.reduce(function (a, l) { return Math.max(a, l.disc || 0); }, 0);
+    return { sub: sub, disc: order, maxDisc: Math.max(order, order > 0 ? 0 : maxItem), off: r2(sub - total), total: total,
+      units: pos.cart.reduce(function (a, l) { return a + l.qty; }, 0), itemDisc: pos.cart.some(function (l) { return l.disc > 0; }) };
+  }
+
+  /* the % button on a checkout line: discount some of the units */
+  function openItemDiscount(pos, key) {
+    var line = pos.cart.filter(function (l) { return l.key === key; })[0];
+    if (!line) return;
+    var p = product(pos, line.ref);
+    var editing = line.disc > 0;
+    var m = modal(
+      '<div class="pay-head"><h2>Item discount</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<p class="muted" style="margin-top:0">' + S.esc(p.name) + ' · ' + S.money(p.price) + ' each</p>' +
+      '<div class="two">' +
+      '<div class="field"><label for="idQty">Quantity discounted</label><input class="input money-in" id="idQty" inputmode="numeric" value="' + (editing ? line.qty : 1) + '"></div>' +
+      '<div class="field"><label for="idPct">Discount %</label><input class="input money-in" id="idPct" inputmode="decimal" placeholder="0" value="' + (editing ? line.disc : '') + '"></div>' +
+      '</div>' +
+      '<div class="field"><label for="idNote">Note (optional)</label><input class="input" id="idNote" placeholder="Promo code, voucher…" value="' + S.esc(line.note || '') + '"></div>' +
+      '<label class="check"><input type="checkbox" id="idRound"' + (line.round !== false ? ' checked' : '') + '> Round down to whole $</label>' +
+      '<div class="small muted" id="idPreview"></div>' +
+      '<div id="idErr"></div>' +
+      '<div class="dialog-actions">' + (editing ? '<button class="btn btn-ghost" id="idRemove">Remove discount</button>' : '') +
+      '<button class="btn btn-primary" id="idOk">OK</button></div>');
+    var $ = function (sel) { return m.el.querySelector(sel); };
+    var maxQ = line.qty;
+    function preview() {
+      var q = Math.max(1, Math.min(maxQ, Math.round(parseNum($('#idQty').value)) || 1));
+      var d = parseNum($('#idPct').value);
+      var t = r2(p.price * q * (1 - d / 100));
+      if ($('#idRound').checked && d > 0) t = Math.floor(t);
+      $('#idPreview').textContent = d > 0 ? q + '× ' + S.money(p.price) + ' → ' + S.money(t) : '';
+    }
+    ['#idQty', '#idPct'].forEach(function (s2) { $(s2).oninput = preview; });
+    $('#idRound').onchange = preview;
+    preview();
+    if ($('#idRemove')) $('#idRemove').onclick = function () {
+      line.disc = 0; line.note = ''; line.round = true;
+      mergeFullPrice(pos, line.ref);
+      m.close(); renderCheckout(pos);
+    };
+    $('#idOk').onclick = function () {
+      var q = Math.round(parseNum($('#idQty').value));
+      var d = parseNum($('#idPct').value);
+      var err = '';
+      if (!(q >= 1 && q <= maxQ)) err = 'Quantity must be between 1 and ' + maxQ + '.';
+      else if (!(d > 0)) err = 'Enter the discount %.';
+      else if (d > pos.data.maxDiscountPct) err = 'This discount is above what is allowed for this event.';
+      if (err) { $('#idErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
+      var target = line;
+      if (q < line.qty) { line.qty -= q; target = newLine(line.ref, q); pos.cart.splice(pos.cart.indexOf(line) + 1, 0, target); }
+      target.disc = d; target.round = $('#idRound').checked; target.note = $('#idNote').value.trim();
+      pos.discount = ''; // an item discount and an order discount don't mix
+      m.close(); renderCheckout(pos);
+    };
+  }
+
+  function mergeFullPrice(pos, ref) {
+    var full = pos.cart.filter(function (l) { return l.ref === ref && !l.disc; });
+    if (full.length < 2) return;
+    full[0].qty = full.reduce(function (a, l) { return a + l.qty; }, 0);
+    pos.cart = pos.cart.filter(function (l) { return !(l.ref === ref && !l.disc && l !== full[0]); });
   }
 
   /* laptop side panel + phone bottom bar: a summary; everything else happens on the checkout page */
@@ -533,14 +628,14 @@
       '<div class="cart-head"><h2>Current sale</h2></div>' +
       '<div class="cart-lines">' + (pos.cart.length ? pos.cart.map(function (l) {
         var p = product(pos, l.ref);
-        return p ? '<div class="cart-line simple"><div class="cl-name">' + l.qty + '× ' + S.esc(p.name) + '</div><div class="cl-total">' + S.money(r2(p.price * l.qty)) + '</div></div>' : '';
+        return p ? '<div class="cart-line simple"><div class="cl-name">' + l.qty + '× ' + S.esc(p.name) + (l.disc ? ' <span class="disc-tag">−' + S.num(l.disc) + '%</span>' : '') + '</div><div class="cl-total">' + S.money(lineTotal(pos, l)) + '</div></div>' : '';
       }).join('') : '<div class="cart-empty">Tap products to add them.</div>') + '</div>' +
       (pos.cart.length
-        ? '<div class="cart-totals"><div class="grand"><span>Total</span><span>' + S.money(t.sub) + '</span></div></div>' +
+        ? '<div class="cart-totals"><div class="grand"><span>Total</span><span>' + S.money(t.total) + '</span></div></div>' +
           '<div class="cart-actions"><button class="btn btn-ghost" id="cartClear">Clear</button>' +
           '<button class="btn btn-accent btn-big" id="cartReview">Checkout</button></div>'
         : '');
-    bar.innerHTML = t.units ? '<span>' + t.units + (t.units === 1 ? ' item' : ' items') + '</span><b>' + S.money(t.sub) + '</b><span>Checkout ›</span>' : '';
+    bar.innerHTML = t.units ? '<span>' + t.units + (t.units === 1 ? ' item' : ' items') + '</span><b>' + S.money(t.total) + '</b><span>Checkout ›</span>' : '';
     bar.className = 'pos-cartbar' + (t.units ? ' show' : '');
     var clr = el.querySelector('#cartClear');
     if (clr) clr.onclick = function () { if (window.confirm('Clear this sale?')) { resetSale(pos); render(pos); } };
@@ -549,7 +644,7 @@
   }
 
   function resetSale(pos) {
-    pos.cart = []; pos.discount = ''; pos.note = ''; pos.seller = ''; pos.pay = null;
+    pos.cart = []; pos.discount = ''; pos.note = ''; pos.seller = ''; pos.pay = null; pos.roundOrder = true;
   }
 
   /* ---------------- checkout: one full page, every field visible from the start */
@@ -636,16 +731,21 @@
       '<section class="co-card"><h3>Items</h3>' + pos.cart.map(function (l) {
         var p = product(pos, l.ref);
         if (!p) return '';
-        return '<div class="cart-line"><div class="cl-main"><div class="cl-name">' + S.esc(p.name) + '</div>' +
-          '<div class="cl-price">' + S.money(p.price) + ' each</div></div>' +
-          '<div class="qty"><button data-dec="' + S.esc(l.ref) + '" aria-label="One less">−</button><span>' + l.qty + '</span>' +
-          '<button data-inc="' + S.esc(l.ref) + '" aria-label="One more">+</button></div>' +
-          '<div class="cl-total">' + S.money(r2(p.price * l.qty)) + '</div></div>';
+        var orderOn = parseNum(pos.discount) > 0;
+        var gross = r2(p.price * l.qty), lt = lineTotal(pos, l, orderOn);
+        return '<div class="cart-line co-line"><div class="cl-main"><div class="cl-name">' + S.esc(p.name) + '</div>' +
+          '<div class="cl-price">' + S.money(p.price) + ' each' + (l.disc && !orderOn ? ' · <span class="disc-tag">−' + S.num(l.disc) + '%' + (l.note ? ' · ' + S.esc(l.note) : '') + '</span>' : '') + '</div></div>' +
+          '<div class="qty"><button data-ldec="' + l.key + '" aria-label="One less">−</button><span>' + l.qty + '</span>' +
+          '<button data-linc="' + l.key + '" aria-label="One more">+</button></div>' +
+          '<div class="cl-total">' + (lt !== gross ? '<s>' + S.money(gross) + '</s>' : '') + S.money(lt) + '</div>' +
+          '<button class="pct' + (l.disc && !orderOn ? ' on' : '') + '" data-pct="' + l.key + '" aria-label="Item discount">%</button></div>';
       }).join('') +
       '<div class="disc-note">' +
-      '<div class="field"><label for="coDisc">Disc. %</label><input class="input" id="coDisc" inputmode="decimal" placeholder="0" value="' + S.esc(pos.discount) + '"></div>' +
+      '<div class="field"><label for="coDisc">Order disc. %</label><input class="input" id="coDisc" inputmode="decimal" placeholder="0" value="' + S.esc(pos.discount) + '"></div>' +
       '<div class="field"><label for="coNote">Note</label><input class="input" id="coNote" placeholder="Promo code, voucher…" value="' + S.esc(pos.note) + '"></div>' +
-      '</div><div class="small neg" id="coDiscErr"></div></section>' +
+      '</div>' +
+      '<label class="check"><input type="checkbox" id="coRound"' + (pos.roundOrder !== false ? ' checked' : '') + '> Round down to whole $</label>' +
+      '<div class="small warn-text" id="coReplace"></div><div class="small neg" id="coDiscErr"></div></section>' +
 
       '<section class="co-card co-total"><div class="co-sub" id="coSub"></div><div class="big" id="coTotal"></div><div class="muted" id="coTotalLbp"></div></section>' +
 
@@ -653,6 +753,7 @@
       '<div class="seg" id="paySeg">' + ['Cash', 'Online', 'Split'].map(function (x) {
         return '<button data-m="' + x + '" class="' + (pay.method === x ? 'active' : '') + '">' + (x === 'Split' ? 'Cash + online' : x) + '</button>';
       }).join('') + '</div>' +
+      (d.whishLink ? '<button class="whish-btn" id="whishBtn" hidden><img src="assets/whish.png" alt="">Show Whish QR</button>' : '') +
       '<div class="field" id="onlineField"><label for="payOnline">Paid online (USD)</label><input class="input money-in" id="payOnline" inputmode="decimal" placeholder="0" value="' + S.esc(pay.online) + '"></div>' +
       '<div class="two">' +
       '<div class="field cashf"><label for="payUsd">Received USD</label><input class="input money-in" id="payUsd" inputmode="decimal" placeholder="0" value="' + S.esc(pay.recvUsd) + '"></div>' +
@@ -667,11 +768,10 @@
       '</section>' +
 
       '<section class="co-card"><h3>Sold by <span class="req">required</span></h3>' +
-      (sellers.length
-        ? '<div class="sellers">' + sellers.map(function (n) {
-          return '<button class="seller' + (pos.seller === n ? ' active' : '') + '" data-seller="' + S.esc(n) + '">' + S.esc(n) + '</button>';
-        }).join('') + '</div>'
-        : '<div class="cart-empty-seller">Nobody is clocked in. <button class="link-btn" id="coClockIn">Clock in</button></div>') +
+      '<div class="sellers">' + sellers.map(function (n) {
+        return '<button class="seller' + (pos.seller === n ? ' active' : '') + '" data-seller="' + S.esc(n) + '">' + S.esc(n) + '</button>';
+      }).join('') + '<button class="seller add" id="coClockIn">+ Clock in</button></div>' +
+      (sellers.length ? '' : '<div class="small muted" style="margin-top:6px">Nobody is clocked in yet.</div>') +
       '</section>' +
 
       '<div id="payError"></div>' +
@@ -682,8 +782,9 @@
     var clearErr = function () { $('#payError').innerHTML = ''; };
     $('#coBack').onclick = function () { closeCheckout(pos); };
     $('#coClear').onclick = function () { if (window.confirm('Clear this sale?')) { resetSale(pos); closeCheckout(pos); } };
-    Array.prototype.forEach.call(root.querySelectorAll('[data-inc]'), function (b) { b.onclick = function () { addToCart(pos, b.getAttribute('data-inc'), 1); }; });
-    Array.prototype.forEach.call(root.querySelectorAll('[data-dec]'), function (b) { b.onclick = function () { addToCart(pos, b.getAttribute('data-dec'), -1); }; });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-linc]'), function (b) { b.onclick = function () { changeLine(pos, b.getAttribute('data-linc'), 1); }; });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-ldec]'), function (b) { b.onclick = function () { changeLine(pos, b.getAttribute('data-ldec'), -1); }; });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-pct]'), function (b) { b.onclick = function () { openItemDiscount(pos, b.getAttribute('data-pct')); }; });
     Array.prototype.forEach.call(root.querySelectorAll('[data-seller]'), function (b) {
       b.onclick = function () {
         pos.seller = b.getAttribute('data-seller');
@@ -691,8 +792,20 @@
         clearErr();
       };
     });
-    if ($('#coClockIn')) $('#coClockIn').onclick = function () { openStaff(pos, function () { renderCheckout(pos); }); };
+    $('#coClockIn').onclick = function () {
+      openStaff(pos, function (name, dir) { if (dir === 'in') pos.seller = name; renderCheckout(pos); });
+    };
     $('#coDisc').oninput = function () { pos.discount = this.value.replace(/[^0-9.]/g, ''); update(pos); };
+    $('#coDisc').onchange = function () {
+      // an order discount replaces the item discounts
+      if (parseNum(pos.discount) > 0 && pos.cart.some(function (l) { return l.disc > 0; })) {
+        pos.cart.forEach(function (l) { l.disc = 0; l.note = ''; l.round = true; });
+        var refs = {}; pos.cart.forEach(function (l) { refs[l.ref] = 1; });
+        Object.keys(refs).forEach(function (r) { mergeFullPrice(pos, r); });
+        renderCheckout(pos);
+      }
+    };
+    $('#coRound').onchange = function () { pos.roundOrder = this.checked; update(pos); };
     $('#coNote').oninput = function () { pos.note = this.value; };
     Array.prototype.forEach.call(root.querySelectorAll('[data-m]'), function (b) {
       b.onclick = function () {
@@ -716,8 +829,30 @@
       function () { return pos.data.lbpStep || 5000; }, function (u, l) { pay.changeUsd = u; pay.changeLbp = l; clearErr(); });
     keepAboveKeyboard(root);
     $('#payConfirm').onclick = function () { confirmSale(pos); };
+    if ($('#whishBtn')) $('#whishBtn').onclick = function () { showWhish(pos, calc(pos).online); };
     wireErrorSlot(pos, root);
     update(pos);
+  }
+
+  /* full-screen Whish QR for the customer to scan */
+  function showWhish(pos, amount) {
+    var link = pos.data.whishLink;
+    if (!link || !window.qrcode) return;
+    var qr = window.qrcode(0, 'M');
+    qr.addData(link);
+    qr.make();
+    var n = qr.getModuleCount(), cells = '';
+    for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (qr.isDark(r, c)) cells += 'M' + c + ' ' + r + 'h1v1h-1z';
+    var svg = '<svg viewBox="-4 -4 ' + (n + 8) + ' ' + (n + 8) + '" class="whish-qr" role="img" aria-label="Whish QR code" shape-rendering="crispEdges">' +
+      '<rect x="-4" y="-4" width="' + (n + 8) + '" height="' + (n + 8) + '" fill="#fff"/><path d="' + cells + '" fill="#000"/></svg>';
+    var wrap = document.createElement('div');
+    wrap.className = 'whish-full';
+    wrap.innerHTML = '<div class="whish-inner"><img class="whish-logo" src="assets/whish.png" alt="Whish Money">' +
+      '<div class="whish-amount">' + (amount > 0 ? 'Pay ' + S.money(amount) : 'Pay with Whish') + '</div>' +
+      '<div class="whish-sub">Scan with the Whish app to transfer</div>' + svg +
+      '<button class="btn btn-primary btn-big btn-block" id="whishDone">Done</button></div>';
+    document.body.appendChild(wrap);
+    wrap.querySelector('#whishDone').onclick = function () { wrap.remove(); };
   }
 
   function calc(pos) {
@@ -739,12 +874,15 @@
     if (!root || pos.view !== 'checkout' || !root.querySelector('#coTotal')) return;
     var d = pos.data, pay = pos.pay, c = calc(pos), t = c.t;
     var $ = function (sel) { return root.querySelector(sel); };
-    $('#coSub').innerHTML = t.off ? 'Subtotal ' + S.money(t.sub) + ' · Discount ' + t.disc + '% −' + S.money(t.off) : '&nbsp;';
+    $('#coSub').innerHTML = t.off ? 'Subtotal ' + S.money(t.sub) + ' · Discount −' + S.money(t.off) : '&nbsp;';
     $('#coTotal').textContent = S.money(t.total);
     $('#coTotalLbp').textContent = lbp(roundLbp(t.total * c.fx, c.step)) + ' at ' + S.num(c.fx);
     $('#coDiscErr').textContent = t.disc > d.maxDiscountPct ? 'This discount is above what is allowed for this event.' : '';
+    $('#coReplace').textContent = t.itemDisc && !t.disc ? 'An order discount replaces the item discounts on this sale.' : '';
+    $('#coRound').parentNode.classList.toggle('off', !(t.disc > 0));
     var cash = pay.method !== 'Online';
     $('#onlineField').hidden = pay.method !== 'Split';
+    if ($('#whishBtn')) $('#whishBtn').hidden = pay.method === 'Cash';
     Array.prototype.forEach.call(root.querySelectorAll('.cashf'), function (f) {
       f.classList.toggle('off', !cash);
       f.querySelector('input').disabled = !cash;
@@ -765,11 +903,13 @@
   function confirmSale(pos) {
     var pay = pos.pay, c = calc(pos), t = c.t;
     var err = '';
-    if (t.disc > pos.data.maxDiscountPct) err = 'The discount is above what is allowed for this event.';
+    if (t.maxDisc > pos.data.maxDiscountPct) err = 'The discount is above what is allowed for this event.';
     else if (pay.method === 'Split' && !(c.online > 0 && c.online < t.total)) err = 'Enter the part paid online (less than the total).';
     var sale = {
-      id: newSaleId(), seller: pos.seller, method: pay.method, discountPct: t.disc, note: pos.note.trim(),
-      lines: pos.cart.map(function (l) { return { ref: l.ref, qty: l.qty }; }),
+      id: newSaleId(), seller: pos.seller, method: pay.method, discountPct: t.disc, roundTotal: pos.roundOrder !== false, note: pos.note.trim(),
+      lines: pos.cart.map(function (l) {
+        return t.disc > 0 || !l.disc ? { ref: l.ref, qty: l.qty } : { ref: l.ref, qty: l.qty, discountPct: l.disc, roundDown: l.round !== false, note: l.note };
+      }),
       onlineUsd: c.online, recvUsd: 0, recvLbp: 0, changeUsd: 0, changeLbp: 0, clientTime: new Date().toISOString(), total: t.total
     };
     if (!err && c.hasCash) {
@@ -780,7 +920,7 @@
       if (c.paid < c.due - c.tol) err = 'The cash received is less than ' + S.money(c.due) + '.';
       else {
         var diff = c.change - sale.changeUsd - sale.changeLbp / c.fx;
-        if (Math.abs(diff) > 1 + c.tol) err = diff > 0 ? 'Change to give is ' + S.money(c.change) + '. Enter the change given (USD and/or LBP).' : 'More change given than due. Check the amounts.';
+        if (Math.abs(diff) > c.tol) err = diff > 0 ? 'Change to give is ' + S.money(c.change) + '. Enter the change given (USD and/or LBP).' : 'More change given than due. Check the amounts.';
       }
     }
     if (!err && !pos.seller) err = 'Pick who made the sale (Sold by).';
@@ -898,7 +1038,7 @@
         ret.refundUsd = parseNum(r.refundUsd);
         ret.refundLbp = Math.round(parseNum(r.refundLbp));
         var diff = due - ret.refundUsd - ret.refundLbp / fx;
-        if (Math.abs(diff) > 1 + step / fx + 0.005) err = diff > 0 ? 'Enter what was given back (USD and/or LBP): ' + S.money(due) + ' is due.' : 'More given back than due. Check the amounts.';
+        if (Math.abs(diff) > step / fx + 0.005) err = diff > 0 ? 'Enter what was given back (USD and/or LBP): ' + S.money(due) + ' is due.' : 'More given back than due. Check the amounts.';
       }
       if (err) { $('#rtError').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
       enqueue(pos, { qid: ret.id, type: 'return', ret: ret });
@@ -934,9 +1074,10 @@
         (d.staff.length ? '<div class="staff-list">' + d.staff.map(function (n) {
           var since = open[n];
           var t = since ? (String(since).indexOf('T') > 0 ? new Date(since).toTimeString().slice(0, 5) : String(since).slice(11, 16)) : '';
-          return '<div class="staff-row"><div><b>' + S.esc(n) + '</b><div class="small muted">' + (since ? 'Clocked in at ' + t : 'Not clocked in') + '</div></div>' +
+          return '<div class="staff-row"><div class="sr-top"><div><b>' + S.esc(n) + '</b><div class="small muted">' + (since ? 'Clocked in at ' + t : 'Not clocked in') + '</div></div>' +
             (since ? '<button class="btn btn-ghost" data-out="' + S.esc(n) + '">Clock out</button>'
-              : '<button class="btn btn-primary" data-in="' + S.esc(n) + '">Clock in</button>') + '</div>';
+              : '<button class="btn btn-primary" data-in="' + S.esc(n) + '">Clock in</button>') + '</div>' +
+            '<input class="input staff-note" data-note-for="' + S.esc(n) + '" placeholder="Note for the manager (optional), e.g. arrived at 15:10">' + '</div>';
         }).join('') + '</div>' : '<p class="muted">' + (pos.preview ? 'Still loading the staff list. Close this and try again in a moment.' : 'No staff in the event Settings tab yet.') + '</p>');
     }
     var m = modal(html());
@@ -947,13 +1088,15 @@
           var dir = b.getAttribute('data-in') ? 'in' : 'out';
           if (dir === 'out' && !window.confirm('Clock out ' + name + '?')) return;
           var now = new Date().toISOString();
-          enqueue(pos, { qid: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'clock', name: name, direction: dir, clientTime: now });
+          var noteEl = Array.prototype.filter.call(m.el.querySelectorAll('[data-note-for]'), function (x) { return x.getAttribute('data-note-for') === name; })[0];
+          var note = noteEl ? noteEl.value.trim() : '';
+          enqueue(pos, { qid: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'clock', name: name, direction: dir, clientTime: now, note: note });
           if (dir === 'out' && pos.seller === name) pos.seller = '';
           m.el.querySelector('.pos-dialog').innerHTML = html();
           Array.prototype.forEach.call(m.el.querySelectorAll('[data-close]'), function (x) { x.onclick = m.close; });
           wire();
-          if (after) after(); else drawCart(pos);
           flush(pos);
+          if (after) { m.close(); after(name, dir); } else drawCart(pos);
         };
       });
     }
