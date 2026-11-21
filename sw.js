@@ -1,5 +1,5 @@
 /* SHN LEB Events — offline support: keeps the app and product pictures on the device. */
-var CACHE = 'shn-leb-events-v5';
+var CACHE = 'shn-leb-events-v6';
 var SHELL = ['./', 'index.html', 'config.js', 'assets/app.css', 'assets/app.js', 'assets/pos.js', 'assets/vendor/qrcode.js', 'assets/whish.png',
   'assets/logo-white.png', 'assets/logo-dark.png', 'assets/icon-64.png', 'assets/icon-192.png'];
 

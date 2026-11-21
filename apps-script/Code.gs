@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -34,6 +34,11 @@ const MASTER_SETTINGS = [
   ['DEFAULT_OPENING_CASH_LBP', 0, 'Copied into each new event'],
   ['WHISH_PAY_LINK', 'https://whish.money/app/pay/WttWZdc0D', 'Link inside the Whish QR code shown for online payments. Paste a new link to change the QR; leave empty to hide the Whish button'],
   ['SHOP_DOMAIN', 'superheatedneurons.com', 'Website the POS takes product pictures from (matched by SKU = Ref Code)'],
+  ['TRACKER_COUNTRY', 'LEB', 'Sales Tracker tab: Country'],
+  ['TRACKER_CHANNEL', 'Community', 'Sales Tracker tab: Channel'],
+  ['TRACKER_CHANNEL_TYPE', 'Events', 'Sales Tracker tab: Channel Type'],
+  ['TRACKER_WAREHOUSE', 'Monte Verde WH', 'Sales Tracker tab: Warehouse'],
+  ['EXPENSE_TYPES', 'Rent, Transport, Bags, Marketing, Ops, Other', 'Expense types offered in the app (comma separated)'],
   ['EVENT_EXCLUDED_PRODUCT_LINES', 'Accessories, (Blank), CTT, Display Stands, Events, Giant Games, Merchandizing, Ops, Rebates', 'Catalogue product lines left out of event catalogues. Comma separated; (Blank) = no product line']
 ];
 
@@ -82,7 +87,7 @@ const EVENT_TABS = [
   ['Cash', ['Entry ID', 'Date Time', 'Kind', 'USD', 'LBP', 'Counted / Handed By', 'Handed To', 'Note', 'Expected USD', 'Expected LBP', 'Diff USD', 'Diff LBP', 'Purpose', 'Day', 'Banknotes']],
   ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Expected Sellable', 'Counted Sellable', 'Diff Sellable', 'Expected Demo', 'Counted Demo', 'Diff Demo', 'Counted By', 'Purpose', 'Day']],
   ['Days', ['Day', 'Date', 'Opened At', 'Opened By', 'Closed At', 'Closed By', 'Opening Cash Diff USD', 'Opening Cash Diff LBP', 'Opening Stock Diff (units)', 'Closing Cash Diff USD', 'Closing Cash Diff LBP', 'Closing Stock Diff (units)', 'Cash Variance During Day USD', 'Cash Variance During Day LBP', 'Stock Variance During Day (units)', 'Demo Units Missing (closing)', 'Sales (USD)', 'Online (USD)', 'Units Sold', 'Status']],
-  ['Expenses', ['Date', 'Type', 'Description', 'Amount USD', 'Amount LBP', 'Total USD']],
+  ['Expenses', ['Expense ID', 'Date', 'Type', 'Description', 'Amount USD', 'Amount LBP', 'Total USD', 'Added At']],
   ['P&L', ['Line', 'USD']],
   ['Sales Tracker', ['Date', 'Product Code', 'Description', 'Qty', 'Total Sales $', 'Country', 'Channel', 'Channel Type', 'Warehouse', 'Delivered by', 'Sales Date', 'Invoice Date', 'Invoice number', 'Parent Account', 'Customer', 'Branch', 'Product Ref.', 'Description', 'Quantity', 'Unit Amount HT (Invoiced)', 'Currency', 'Total Amount HT (Invoiced)', 'Total VAT (Invoiced)']]
 ];
@@ -190,6 +195,9 @@ function route_(req) {
     case 'recordCash': requireEventAccess_(req, req.eventId); return { cash: recordCash_(req.eventId, req.cash) };
     case 'dayAction': requireEventAccess_(req, req.eventId); return { day: dayAction_(req.eventId, req.day) };
     case 'eventReport': requireAdmin_(req); return { report: eventReport_(req.id) };
+    case 'addExpense': requireAdmin_(req); return { expense: addExpense_(req.id, req.expense) };
+    case 'deleteExpense': requireAdmin_(req); return { deleted: deleteExpense_(req.id, req.expenseId) };
+    case 'pnl': requireAdmin_(req); return { pnl: pnl_(req.id, req.writeSheet !== false) };
     default: throw userError_('Unknown action.', 'bad_action');
   }
 }
@@ -1269,6 +1277,7 @@ function dayAction_(id, d) {
         cc ? cc[10] : '', cc ? cc[11] : '', cs ? cs.net : '',
         cc ? v(startUsd, cc[10]) : '', cc ? v(startLbp, cc[11]) : '', cs ? v(startStock, cs.net) : '',
         cs ? cs.demoMissing : '', round2_(sales), round2_(online), units, 'Closed']]);
+      try { pnl_(id, true); } catch (e) { console.error(e); } // refresh the P&L and Sales Tracker tabs
       return dayState_(ss);
     }
     throw userError_('Start or close the day?', 'invalid');
@@ -1368,6 +1377,196 @@ function eventReport_(id) {
     }).reverse(),
     fxRate: Number(settings['Exchange Rate (LBP per USD)']) || 0
   };
+}
+
+/* ------------------------------------------------------------------ expenses, P&L, dashboard, Sales Tracker */
+
+function readExpenses_(ss, fx) {
+  const sh = ss.getSheetByName('Expenses');
+  if (!sh) return [];
+  return sh.getDataRange().getValues().slice(1).filter(function (r) { return String(r[2] || r[3]).trim(); }).map(function (r, i) {
+    const usd = Number(r[4]) || 0, lbp = Number(r[5]) || 0;
+    return { id: String(r[0] || ''), row: i + 2, date: dateStr_(r[1]), type: String(r[2] || 'Other'), description: String(r[3] || ''),
+      usd: usd, lbp: lbp, total: round2_(usd + (fx ? lbp / fx : 0)) };
+  });
+}
+
+function addExpense_(id, e) {
+  e = e || {};
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const ss = SpreadsheetApp.openById(ev.sheetId);
+  const sh = needTab_(ss, 'Expenses');
+  const fx = Number(readEventSettings_(ev.sheetId)['Exchange Rate (LBP per USD)']) || 0;
+  const usd = round2_(Math.max(0, Number(e.usd) || 0)), lbp = Math.max(0, Math.round(Number(e.lbp) || 0));
+  if (!usd && !lbp) throw userError_('Enter an amount.', 'invalid');
+  const date = isIsoDate_(String(e.date || '')) ? String(e.date) : nowStamp_().slice(0, 10);
+  const type = String(e.type || 'Other').trim().slice(0, 40) || 'Other';
+  const xid = 'X' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
+  const r = sh.getLastRow() + 1;
+  sh.getRange(r, 1, 1, 2).setNumberFormat('@');
+  sh.getRange(r, 1, 1, 8).setValues([[xid, date, type, String(e.description || '').slice(0, 200), usd, lbp, round2_(usd + (fx ? lbp / fx : 0)), nowStamp_()]]);
+  return { id: xid, date: date, type: type, usd: usd, lbp: lbp };
+}
+
+function deleteExpense_(id, xid) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const sh = needTab_(SpreadsheetApp.openById(ev.sheetId), 'Expenses');
+  const rows = sh.getDataRange().getValues();
+  for (let i = rows.length - 1; i >= 1; i--) {
+    if (String(rows[i][0]) === String(xid)) { sh.deleteRow(i + 1); return true; }
+  }
+  throw userError_('Expense not found.', 'not_found');
+}
+
+function fmtTrackerDate_(iso) {
+  const m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const p = String(iso).split('-');
+  return p.length === 3 ? Number(p[2]) + '-' + m[Number(p[1]) - 1] + '-' + p[0].slice(2) : String(iso);
+}
+
+/* The P&L (and dashboard figures). With writeSheet, also rewrites the P&L and Sales Tracker tabs. */
+function pnl_(id, writeSheet) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const ss = SpreadsheetApp.openById(ev.sheetId);
+  const settings = readEventSettings_(ev.sheetId);
+  const fx = Number(settings['Exchange Rate (LBP per USD)']) || 0;
+  const cogsPct = Number(settings['COGS %']) || 0;
+  const inv = getInventory_(id);
+  const items = {};
+  inv.items.forEach(function (it) { items[it.ref] = it; });
+  const sales = ss.getSheetByName('Sales').getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim() && !String(r[20] || '').trim(); });
+
+  let total = 0, shn = 0, ext = 0, vat = 0, online = 0, units = 0, returns = 0, discounts = 0;
+  const byDay = {}, byCat = {}, byProduct = {}, bySeller = {}, byPartner = {}, tickets = {};
+  sales.forEach(function (r) {
+    const ref = String(r[5]), q = Number(r[8]) || 0, t = Number(r[11]) || 0, it = items[ref];
+    const isExt = it ? it.consignment : /^C\d+$/.test(ref);
+    total += t; units += q; vat += Number(r[19]) || 0;
+    if (Number(r[1]) === 1) online += Number(r[13]) || 0;
+    if (t < 0) returns += -t;
+    discounts += Math.max(0, (Number(r[9]) || 0) * q - t) * (q > 0 ? 1 : 0);
+    if (isExt) {
+      ext += t;
+      const partner = (it && it.partner) || 'External';
+      const pp = byPartner[partner] = byPartner[partner] || { partner: partner, units: 0, sales: 0, owed: 0 };
+      pp.units += q; pp.sales = round2_(pp.sales + t);
+      if (it && it.payType === 'Fixed') pp.owed = round2_(pp.owed + it.payValue * q);
+      else if (it && it.payType === '%') pp.owed = round2_(pp.owed + t * it.payValue / 100);
+    } else shn += t;
+    const d = dateStr_(r[2]);
+    const day = byDay[d] = byDay[d] || { date: d, sales: 0, units: 0, tickets: {} };
+    day.sales = round2_(day.sales + t); day.units += q;
+    if (q > 0 && !String(r[24] || '').trim()) day.tickets[String(r[0])] = true;
+    const cat = String(r[7] || 'Other');
+    const c = byCat[cat] = byCat[cat] || { name: cat, sales: 0, units: 0 };
+    c.sales = round2_(c.sales + t); c.units += q;
+    const pr = byProduct[ref] = byProduct[ref] || { ref: ref, name: String(r[6]), sales: 0, units: 0 };
+    pr.sales = round2_(pr.sales + t); pr.units += q;
+    const sel = String(r[4] || '');
+    const se = bySeller[sel] = bySeller[sel] || { name: sel, sales: 0, units: 0 };
+    se.sales = round2_(se.sales + t); se.units += q;
+    if (q > 0 && !String(r[24] || '').trim()) tickets[String(r[0])] = true;
+  });
+  const report = eventReport_(id);
+  const staffCost = round2_(report.pay.reduce(function (a, p) { return a + p.pay; }, 0));
+  const expenses = readExpenses_(ss, fx);
+  const byType = {};
+  expenses.forEach(function (e) { byType[e.type] = round2_((byType[e.type] || 0) + e.total); });
+  const expTotal = round2_(expenses.reduce(function (a, e) { return a + e.total; }, 0));
+  const cogs = round2_(shn * cogsPct / 100);
+  const partnersOwed = round2_(Object.keys(byPartner).reduce(function (a, k) { return a + byPartner[k].owed; }, 0));
+  total = round2_(total);
+  const gross = round2_(total - cogs - partnersOwed);
+  const net = round2_(gross - staffCost - expTotal);
+
+  // weekday / weekend and targets
+  const days = Object.keys(byDay).sort().map(function (k) {
+    const d = byDay[k];
+    const wd = new Date(k + 'T12:00:00Z').getUTCDay();
+    return { date: k, sales: d.sales, units: d.units, tickets: Object.keys(d.tickets).length, weekend: wd === 0 || wd === 6 };
+  });
+  const avg = function (list, f) { return list.length ? round2_(list.reduce(function (a, x) { return a + f(x); }, 0) / list.length) : 0; };
+  const nTickets = Object.keys(tickets).length;
+  const out = {
+    cogsPct: cogsPct, fxRate: fx,
+    lines: { sales: total, shnSales: round2_(shn), externalSales: round2_(ext), vatIncluded: round2_(vat), returns: round2_(returns),
+      cogs: cogs, partnersOwed: partnersOwed, gross: gross, staffCost: staffCost, expenses: expTotal, expensesByType: byType,
+      net: net, netPct: total ? round2_(net / total * 100) : 0 },
+    partners: Object.keys(byPartner).map(function (k) { return byPartner[k]; }),
+    expenses: expenses.reverse(),
+    expenseTypes: String(masterSetting_('EXPENSE_TYPES') || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean),
+    dashboard: {
+      sales: total, units: units, tickets: nTickets, avgTicket: nTickets ? round2_(total / nTickets) : 0,
+      online: round2_(online), cash: round2_(total - online), discounts: round2_(discounts),
+      days: days, avgPerDay: avg(days, function (d) { return d.sales; }), avgUnitsPerDay: avg(days, function (d) { return d.units; }),
+      weekday: { days: days.filter(function (d) { return !d.weekend; }).length, avgSales: avg(days.filter(function (d) { return !d.weekend; }), function (d) { return d.sales; }) },
+      weekend: { days: days.filter(function (d) { return d.weekend; }).length, avgSales: avg(days.filter(function (d) { return d.weekend; }), function (d) { return d.sales; }) },
+      categories: Object.keys(byCat).map(function (k) { return byCat[k]; }).sort(function (a, b) { return b.sales - a.sales; }),
+      products: Object.keys(byProduct).map(function (k) { return byProduct[k]; }).sort(function (a, b) { return b.units - a.units || b.sales - a.sales; }).slice(0, 15),
+      sellers: Object.keys(bySeller).map(function (k) { return bySeller[k]; }).sort(function (a, b) { return b.sales - a.sales; }),
+      targetQty: settings['Daily Target Qty'] === '' ? null : Number(settings['Daily Target Qty']) || null,
+      targetSales: settings['Daily Target Sales (USD)'] === '' ? null : Number(settings['Daily Target Sales (USD)']) || null
+    }
+  };
+  if (writeSheet) writeReportTabs_(ss, ev, out, sales, items);
+  return out;
+}
+
+function writeReportTabs_(ss, ev, p, sales, items) {
+  const L = p.lines;
+  const rows = [
+    ['Sales (VAT included)', L.sales], ['  of which SHN products', L.shnSales], ['  of which external products', L.externalSales],
+    ['  returns refunded (already deducted)', L.returns], ['  VAT included in sales (reporting only)', L.vatIncluded], ['', ''],
+    ['COGS (' + p.cogsPct + '% of SHN product sales)', -L.cogs], ['Owed to external product partners', -L.partnersOwed], ['Gross margin', L.gross], ['', ''],
+    ['Staff pay (hours + commission)', -L.staffCost]
+  ];
+  Object.keys(L.expensesByType).sort().forEach(function (k) { rows.push(['Expenses: ' + k, -L.expensesByType[k]]); });
+  rows.push(['', ''], ['Net profit', L.net], ['Net profit %', L.netPct / 100], ['', '']);
+  if (p.partners.length) {
+    rows.push(['External products settlement', '']);
+    p.partners.forEach(function (x) { rows.push(['  ' + x.partner + ': ' + x.units + ' units, sales $' + x.sales, x.owed]); });
+  }
+  rows.push(['', ''], ['Updated', nowStamp_()]);
+  const sh = ss.getSheetByName('P&L');
+  if (sh) {
+    sh.getRange(2, 1, Math.max(sh.getLastRow(), rows.length + 1), 2).clearContent();
+    sh.getRange(2, 1, rows.length, 2).setValues(rows);
+    sh.getRange(2, 2, rows.length, 1).setNumberFormat('$#,##0.00;-$#,##0.00');
+    const pctRow = rows.findIndex(function (r) { return r[0] === 'Net profit %'; });
+    if (pctRow >= 0) sh.getRange(pctRow + 2, 2).setNumberFormat('0.0%');
+  }
+  // Sales Tracker: one line per day and product (SHN products only), in the offline tracker's columns
+  const tr = ss.getSheetByName('Sales Tracker');
+  if (!tr) return;
+  const country = String(masterSetting_('TRACKER_COUNTRY')), channel = String(masterSetting_('TRACKER_CHANNEL')),
+    ctype = String(masterSetting_('TRACKER_CHANNEL_TYPE')), wh = String(masterSetting_('TRACKER_WAREHOUSE'));
+  const agg = {}, order = [];
+  sales.forEach(function (r) {
+    const ref = String(r[5]), it = items[ref];
+    if ((it && it.consignment) || /^C\d+$/.test(ref)) return;
+    const d = dateStr_(r[2]);
+    const k = d + '|' + ref;
+    if (!agg[k]) { agg[k] = { date: d, ref: ref, name: String(r[6]), qty: 0, total: 0 }; order.push(k); }
+    agg[k].qty += Number(r[8]) || 0;
+    agg[k].total = round2_(agg[k].total + (Number(r[11]) || 0));
+  });
+  const out = order.filter(function (k) { return agg[k].qty !== 0 || agg[k].total !== 0; }).sort().map(function (k) {
+    const a = agg[k], sd = fmtTrackerDate_(a.date), dl = typeof a.date === 'string' ? a.date : '';
+    const unit = a.qty ? round2_(a.total / a.qty) : 0;
+    const dt = new Date(dl + 'T12:00:00Z');
+    const dayLabel = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dt.getUTCDay()] + ', ' + ('0' + dt.getUTCDate()).slice(-2) + '-' +
+      ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][dt.getUTCMonth()];
+    return [dayLabel, a.ref, a.name, a.qty, a.total, country, channel, ctype, wh, '', sd, sd, '',
+      ev.name, ev.name, '', a.ref, a.name, a.qty, unit, 'USD', a.total, 0];
+  });
+  tr.getRange(2, 1, Math.max(tr.getLastRow(), out.length + 1), 23).clearContent();
+  if (out.length) {
+    tr.getRange(2, 1, out.length, 23).setNumberFormat('@');
+    tr.getRange(2, 4, out.length, 2).setNumberFormat('0.##');
+    tr.getRange(2, 19, out.length, 2).setNumberFormat('0.##');
+    tr.getRange(2, 22, out.length, 2).setNumberFormat('0.##');
+    tr.getRange(2, 1, out.length, 23).setValues(out);
+  }
 }
 
 /* Errors from phones, laptops and the server land in the master sheet's Errors tab. */

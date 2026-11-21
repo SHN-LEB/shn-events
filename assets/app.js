@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.6.0';
+  var APP_VERSION = '1.7.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var TABS = [
@@ -12,9 +12,9 @@
     { id: 'cash', label: 'Cash' },
     { id: 'shifts', label: 'Shifts & pay' },
     { id: 'days', label: 'Days' },
-    { id: 'expenses', label: 'Expenses', phase: 5 },
-    { id: 'dashboard', label: 'Dashboard', phase: 5 },
-    { id: 'pnl', label: 'P&L', phase: 5 }
+    { id: 'expenses', label: 'Expenses' },
+    { id: 'dashboard', label: 'Dashboard' },
+    { id: 'pnl', label: 'P&L' }
   ];
   var TAB_HINT = {
     inventory: 'Opening stock from the SHN Catalogue, demo units, refills and returns, external products and daily counts.',
@@ -300,6 +300,7 @@
     if (!state.event || state.event.id !== id) {
       state.inv = null;
       state.report = null;
+      state.pnl = null;
       loading('Opening event…');
       api('getEvent', { id: id }).then(function (res) {
         state.event = res.event;
@@ -347,6 +348,7 @@
     else if (tab === 'inventory') viewInventory(body, ev);
     else if (tab === 'pos') window.SHN_POS.mount(body, { eventId: ev.id, token: getToken(), admin: true });
     else if (tab === 'cash' || tab === 'shifts' || tab === 'days') viewReport(body, ev, tab);
+    else if (tab === 'expenses' || tab === 'dashboard' || tab === 'pnl') viewPnl(body, ev, tab);
     else {
       var def = TABS.filter(function (t) { return t.id === tab; })[0] || TABS[0];
       body.innerHTML = '<div class="card placeholder"><h2>' + esc(def.label) + '</h2>' +
@@ -561,6 +563,108 @@
     body.innerHTML = html;
     document.getElementById('repRefresh').onclick = function () { state.report = null; viewReport(body, ev, tab); };
   }
+  /* ---------------- expenses, dashboard, P&L */
+  function viewPnl(body, ev, tab) {
+    if (!state.pnl || state.pnl.id !== ev.id) {
+      body.innerHTML = '<div class="loading"><div class="spinner"></div><div>Working out the numbers…</div></div>';
+      api('pnl', { id: ev.id, writeSheet: tab === 'pnl' }).then(function (res) {
+        state.pnl = { id: ev.id, data: res.pnl };
+        if (document.getElementById('tabBody') === body) viewPnl(body, ev, tab);
+      }).catch(function (err) {
+        body.innerHTML = '<div class="card empty"><h2>Couldn\'t load</h2><p class="muted">' + esc(err.message) + '</p><button class="btn btn-primary" id="pnlRetry">Try again</button></div>';
+        document.getElementById('pnlRetry').onclick = function () { viewPnl(body, ev, tab); };
+      });
+      return;
+    }
+    var p = state.pnl.data, L = p.lines, d = p.dashboard;
+    var refresh = '<div class="toolbar"><span></span><button class="btn btn-ghost" id="pnlRefresh">Refresh</button></div>';
+    var html = '';
+    if (tab === 'expenses') {
+      var today = todayIso();
+      html = '<form class="card card-pad exp-form" id="expForm">' +
+        '<div class="exp-grid">' +
+        '<div class="field"><label>Date</label><input class="input" type="date" id="exDate" value="' + today + '"></div>' +
+        '<div class="field"><label>Type</label><select class="input" id="exType">' + p.expenseTypes.map(function (t) { return '<option>' + esc(t) + '</option>'; }).join('') + '</select></div>' +
+        '<div class="field exp-desc"><label>Description</label><input class="input" id="exDesc" placeholder="e.g. Booth rent, taxi for stock"></div>' +
+        '<div class="field"><label>Amount USD</label><input class="input" id="exUsd" inputmode="decimal" placeholder="0"></div>' +
+        '<div class="field"><label>Amount LBP</label><input class="input" id="exLbp" inputmode="numeric" placeholder="0"></div>' +
+        '</div><div id="exErr"></div><button class="btn btn-primary" id="exAdd" type="submit">Add expense</button>' +
+        '<span class="small muted" style="margin-left:10px">LBP is converted at ' + num(p.fxRate) + ' LBP / $. Staff pay is added to the P&L automatically, don\'t enter it here.</span></form>' +
+        '<div class="toolbar"><h2 class="section-title" style="margin:6px 0">Expenses · ' + money(L.expenses) + '</h2><button class="btn btn-ghost" id="pnlRefresh">Refresh</button></div>' +
+        (p.expenses.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="num">USD</th><th class="num">LBP</th><th class="num">Total USD</th><th></th></tr></thead><tbody>' +
+          p.expenses.map(function (e) {
+            return '<tr><td>' + esc(fmtDay(e.date, false)) + '</td><td>' + esc(e.type) + '</td><td>' + esc(e.description) + '</td><td class="num">' + (e.usd ? money(e.usd) : '–') + '</td>' +
+              '<td class="num">' + (e.lbp ? num(e.lbp) : '–') + '</td><td class="num"><b>' + money(e.total) + '</b></td>' +
+              '<td>' + (e.id ? '<button class="link-btn neg" data-del="' + esc(e.id) + '">Delete</button>' : '<span class="small muted">in sheet</span>') + '</td></tr>';
+          }).join('') + '</tbody></table></div>' : '<div class="card card-pad muted">No expenses yet.</div>');
+    }
+    if (tab === 'dashboard') {
+      var maxDay = Math.max.apply(null, d.days.map(function (x) { return x.sales; }).concat([d.targetSales || 0, 1]));
+      var bar = function (label, value, max, extra) {
+        return '<div class="bar-row"><div class="bar-label">' + label + '</div><div class="bar-track"><div class="bar-fill" style="width:' + Math.max(0, Math.min(100, value / max * 100)) + '%"></div></div><div class="bar-val">' + extra + '</div></div>';
+      };
+      var maxCat = Math.max.apply(null, d.categories.map(function (x) { return x.sales; }).concat([1]));
+      var maxProd = Math.max.apply(null, d.products.map(function (x) { return x.units; }).concat([1]));
+      var maxSeller = Math.max.apply(null, d.sellers.map(function (x) { return x.sales; }).concat([1]));
+      html = refresh + '<div class="stats">' +
+        stat('Sales', money(d.sales)) + stat('Units sold', num(d.units)) + stat('Tickets', num(d.tickets) + '<div class="sub">sales made</div>') +
+        stat('Average ticket', money(d.avgTicket)) + stat('Per day', money(d.avgPerDay) + '<div class="sub">' + d.avgUnitsPerDay + ' units</div>') +
+        stat('Cash / online', money(d.cash) + '<div class="sub">' + money(d.online) + ' online</div>') + '</div>' +
+        '<div class="dash-grid">' +
+        '<div class="card card-pad"><h3>Sales per day' + (d.targetSales ? ' <span class="small muted">(target ' + money(d.targetSales) + ')</span>' : '') + '</h3>' +
+        (d.days.length ? d.days.map(function (x) {
+          var hit = d.targetSales ? (x.sales >= d.targetSales ? ' <span class="good-t">✓</span>' : ' <span class="neg">✗</span>') : '';
+          return bar(esc(fmtDay(x.date, false)) + (x.weekend ? ' <span class="pref">weekend</span>' : ''), x.sales, maxDay, money(x.sales) + hit + '<div class="pref">' + num(x.units) + ' units</div>');
+        }).join('') : '<p class="muted">No sales yet.</p>') +
+        '<p class="small muted">Weekdays: ' + money(d.weekday.avgSales) + ' a day (' + d.weekday.days + ' days) · Weekends: ' + money(d.weekend.avgSales) + ' a day (' + d.weekend.days + ' days)</p></div>' +
+        '<div class="card card-pad"><h3>By category</h3>' + (d.categories.length ? d.categories.map(function (x) { return bar(esc(x.name), x.sales, maxCat, money(x.sales) + '<div class="pref">' + num(x.units) + ' units</div>'); }).join('') : '<p class="muted">No sales yet.</p>') + '</div>' +
+        '<div class="card card-pad"><h3>Top products</h3>' + (d.products.length ? d.products.map(function (x) { return bar(esc(x.name), x.units, maxProd, num(x.units) + ' units<div class="pref">' + money(x.sales) + '</div>'); }).join('') : '<p class="muted">No sales yet.</p>') + '</div>' +
+        '<div class="card card-pad"><h3>By seller</h3>' + (d.sellers.length ? d.sellers.map(function (x) { return bar(esc(x.name || '–'), x.sales, maxSeller, money(x.sales) + '<div class="pref">' + num(x.units) + ' units</div>'); }).join('') : '<p class="muted">No sales yet.</p>') + '</div>' +
+        '</div>';
+    }
+    if (tab === 'pnl') {
+      var line = function (k, v, cls) { return '<tr class="' + (cls || '') + '"><td>' + k + '</td><td class="num">' + (v < 0 ? '−' + money(-v) : money(v)) + '</td></tr>'; };
+      html = refresh + '<div class="pnl-wrap"><div class="card table-wrap"><table class="tbl pnl"><tbody>' +
+        line('Sales <span class="pref">VAT included, after discounts and returns</span>', L.sales, 'strong') +
+        line('&nbsp;&nbsp;SHN products', L.shnSales, 'sub') + line('&nbsp;&nbsp;External products', L.externalSales, 'sub') +
+        line('COGS <span class="pref">' + p.cogsPct + '% of SHN product sales</span>', -L.cogs) +
+        line('Owed to external product partners', -L.partnersOwed) +
+        line('Gross margin', L.gross, 'strong') +
+        line('Staff pay <span class="pref">hours + commission</span>', -L.staffCost) +
+        Object.keys(L.expensesByType).sort().map(function (k) { return line('Expenses: ' + esc(k), -L.expensesByType[k]); }).join('') +
+        line('Net profit <span class="pref">' + L.netPct + '% of sales</span>', L.net, 'total' + (L.net < 0 ? ' neg' : '')) +
+        '</tbody></table></div>' +
+        '<div><div class="card card-pad small"><b>For reference</b><br>Returns refunded: ' + money(L.returns) + '<br>VAT included in sales: ' + money(L.vatIncluded) + '</div>' +
+        (p.partners.length ? '<div class="card table-wrap" style="margin-top:12px"><table class="tbl"><thead><tr><th>External partner</th><th class="num">Units</th><th class="num">Sales</th><th class="num">Owed</th></tr></thead><tbody>' +
+          p.partners.map(function (x) { return '<tr><td><b>' + esc(x.partner) + '</b></td><td class="num">' + num(x.units) + '</td><td class="num">' + money(x.sales) + '</td><td class="num"><b>' + money(x.owed) + '</b></td></tr>'; }).join('') + '</tbody></table></div>' : '') +
+        '</div></div><p class="small muted">The P&L and Sales Tracker tabs of the event\'s Google Sheet were updated just now. They also update every time a business day is closed.</p>';
+    }
+    body.innerHTML = html;
+    var rb = document.getElementById('pnlRefresh');
+    if (rb) rb.onclick = function () { state.pnl = null; viewPnl(body, ev, tab); };
+    if (tab === 'expenses') {
+      var lb = document.getElementById('exLbp');
+      lb.oninput = function () { var n = Math.round(Number(lb.value.replace(/[^0-9]/g, ''))); lb.value = n ? n.toLocaleString('en-US') : ''; };
+      document.getElementById('expForm').onsubmit = function (e) {
+        e.preventDefault();
+        var btn = document.getElementById('exAdd'); btn.disabled = true;
+        api('addExpense', { id: ev.id, expense: {
+          date: document.getElementById('exDate').value, type: document.getElementById('exType').value,
+          description: document.getElementById('exDesc').value, usd: Number(document.getElementById('exUsd').value.replace(/[^0-9.]/g, '')) || 0,
+          lbp: Number(lb.value.replace(/[^0-9]/g, '')) || 0 } }).then(function () {
+          toast('Expense added.'); state.pnl = null; viewPnl(body, ev, tab);
+        }).catch(function (err) { btn.disabled = false; document.getElementById('exErr').innerHTML = '<div class="form-error">' + esc(err.message) + '</div>'; });
+      };
+      Array.prototype.forEach.call(body.querySelectorAll('[data-del]'), function (b) {
+        b.onclick = function () {
+          if (!window.confirm('Delete this expense?')) return;
+          api('deleteExpense', { id: ev.id, expenseId: b.getAttribute('data-del') }).then(function () { toast('Expense deleted.'); state.pnl = null; viewPnl(body, ev, tab); })
+            .catch(function (err) { toast(err.message, true); });
+        };
+      });
+    }
+  }
+
   function stat(k, v) { return '<div class="card stat"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
 
   function signed(n) { return n > 0 ? '+' + num(n) : num(n); }
