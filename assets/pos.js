@@ -25,6 +25,7 @@
   function holdKey(id) { return 'shn-hold-' + id; }
   function demoKey(id) { return 'shn-demo-' + id; }
   function contactsKey(id) { return 'shn-contacts-' + id; }
+  function refillKey(id) { return 'shn-refill-' + id; }
 
   function getStaffToken(id) {
     var t = load(staffTokenKey(id), null);
@@ -397,12 +398,12 @@
     var held = holds(pos).length;
     root.innerHTML =
       '<div class="pos-bar">' +
-      '<div class="pos-sync"><button class="icon-btn" id="posRefresh" title="Reload products and stock" aria-label="Refresh">' + ICONS.refresh + '</button><span id="posSync"></span></div>' +
       '<div class="pos-bar-actions">' +
       (pos.admin ? '' : '<button class="btn btn-ghost btn-sm" id="posHome">‹ Home</button>') +
       '<button class="btn btn-ghost btn-sm' + (held ? ' has-hold' : '') + '" id="posHold">On hold' + (held ? ' <b>' + held + '</b>' : '') + '</button>' +
       '<button class="btn btn-ghost btn-sm" id="posRecent">Recent sales</button>' +
       '<button class="btn btn-ghost btn-sm icon-only" id="posCustomer" title="Add a customer contact" aria-label="Add a customer contact">' + ICONS.person + '</button>' +
+      '<button class="icon-btn btn-sm-h" id="posRefresh" title="Reload products and stock" aria-label="Refresh">' + ICONS.refresh + '<span id="syncDot"></span></button>' +
       '</div></div>' + errorSlot(pos) +
       '<div class="pos-grid">' +
       '<section class="pos-products">' +
@@ -450,11 +451,18 @@
   }
 
   function drawSync(pos) {
-    var el = document.getElementById('posSync');
-    if (!el || current !== pos) return;
+    if (current !== pos) return;
     var q = queue(pos);
     var failed = q.filter(function (x) { return x.error; }).length;
     var waiting = q.length - failed;
+    var dot = document.getElementById('syncDot');
+    if (dot) {
+      dot.className = failed ? 'sync-dot bad' : waiting ? 'sync-dot warn' : '';
+      dot.textContent = failed ? failed : waiting ? waiting : '';
+      dot.parentNode.title = failed ? failed + ' not saved: check Recent sales' : waiting ? waiting + ' waiting to send' + (pos.offline ? ' (offline)' : '') : 'Reload products and stock';
+    }
+    var el = document.getElementById('posSync');
+    if (!el) return;
     var html;
     if (failed) html = '<span class="sync bad">' + failed + ' not saved: check Recent sales</span>';
     else if (waiting) html = '<span class="sync warn">' + (pos.syncing ? 'Sending ' : '') + waiting + ' waiting to send' + (pos.offline ? ' (offline)' : '') + '</span>';
@@ -1375,8 +1383,8 @@
     box.innerHTML = (inModal ? '<div class="pay-head"><h2>Clock in / out</h2><button class="link-btn" data-close>Done</button></div>' : '') +
       (d.staff.length ? '<div class="staff-list">' + d.staff.map(function (n) {
         var since = open[n];
-        var t = since ? (String(since).indexOf('T') > 0 ? new Date(since).toTimeString().slice(0, 5) : String(since).slice(11, 16)) : '';
-        return '<div class="staff-row"><div class="sr-top"><div><b>' + S.esc(n) + '</b><div class="small muted">' + (since ? 'Clocked in at ' + t : 'Not clocked in') + '</div></div>' +
+        var cl = since ? clockedLabel(since) : null;
+        return '<div class="staff-row"><div class="sr-top"><div><b>' + S.esc(n) + '</b><div class="small ' + (cl && cl.old ? 'shift-old' : 'muted') + '">' + (since ? 'Clocked in ' + cl.text + (cl.old ? ' · forgot to clock out?' : '') : 'Not clocked in') + '</div></div>' +
           (since ? '<button class="btn btn-ghost" data-out="' + S.esc(n) + '">Clock out</button>'
             : '<button class="btn btn-primary" data-in="' + S.esc(n) + '">Clock in</button>') + '</div>' +
           '<input class="input staff-note" data-note-for="' + S.esc(n) + '" placeholder="Note for the manager (optional), e.g. arrived at 15:10"></div>';
@@ -1397,6 +1405,16 @@
     });
   }
 
+  /* "at 13:32" today, "Sun 22 Nov, 23:53" on an earlier day */
+  function clockedLabel(since) {
+    var d = String(since).indexOf('T') > 0 ? new Date(since) : new Date(String(since).replace(' ', 'T'));
+    if (isNaN(d)) return { text: 'at ' + String(since).slice(11, 16), old: false };
+    var now = new Date();
+    var hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    if (d.toDateString() === now.toDateString()) return { text: 'at ' + hm, old: false };
+    return { text: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + d.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ', ' + hm, old: true };
+  }
+
   function openStaff(pos, after) {
     var m = modal('<div id="staffBox"></div>');
     var box = m.el.querySelector('#staffBox');
@@ -1412,8 +1430,8 @@
   /* ================================================================ staff home: POS, clock, stock count, cash count */
   function go(pos, view) { pos.view = view; render(pos); window.scrollTo(0, 0); }
 
-  function pageTop(pos, title) {
-    return '<div class="co-top"><button class="btn btn-ghost btn-sm" data-home>‹ Home</button><h2 class="page-title">' + S.esc(title) + '</h2><span></span></div>';
+  function pageTop(pos, title, right) {
+    return '<div class="co-top"><button class="btn btn-ghost btn-sm" data-home>‹ Home</button><h2 class="page-title">' + S.esc(title) + '</h2>' + (right || '<span></span>') + '</div>';
   }
   function wireTop(pos, root) {
     Array.prototype.forEach.call(root.querySelectorAll('[data-home]'), function (b) { b.onclick = function () { go(pos, 'home'); }; });
@@ -1476,10 +1494,10 @@
       (tooMuch ? '<div class="cash-warn"><b>Too much cash in the drawer.</b> Ask your manager to collect it, then submit a handover in Cash count.</div>' : '') +
       errorSlot(pos) +
       '<div class="home-grid">' +
-      [['pos', 'POS', 'Sell, checkout, returns'], ['clock', 'Clock in / out', 'Start and end your shift'],
-        ['count', 'Stock count', 'Count, request a refill'], ['cash', 'Cash count', 'Count the drawer, handovers'],
+      [['pos', 'POS', 'Sell, checkout, returns'],
         ['demo', 'Demo counter', demoN.total || demoN.customers ? demoN.total + ' plays · ' + demoN.customers + ' activated' : 'Games played at the stand'],
-        ['customers', 'Customers', 'Save a customer contact']].map(function (b) {
+        ['clock', 'Clock in / out', 'Start and end your shift'], ['count', 'Stock count', 'Count, request a refill'],
+        ['cash', 'Cash count', 'Count the drawer, handovers'], ['customers', 'Customers', 'Save a customer contact']].map(function (b) {
         return '<button class="home-box" data-go="' + b[0] + '">' + ICONS[b[0]] + '<b>' + b[1] + '</b><span>' + S.esc(b[2]) + '</span></button>';
       }).join('') + '</div>' +
       '<div class="home-foot"><span id="posSync"></span></div></div>';
@@ -1517,8 +1535,11 @@
     var missing = [];
     if (!d.counts.cash) missing.push('cash');
     if (!d.counts.stock) missing.push('stock');
+    var stillIn = d.open ? Object.keys(openShiftNames(pos)) : [];
     var m = modal(
       '<div class="pay-head"><h2>' + (d.open ? 'Close day ' + d.number : 'Start day ' + d.next) + '</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      (stillIn.length ? '<div class="pay-status owed" id="stillIn"><span><b>' + S.esc(stillIn.join(', ')) + '</b> ' + (stillIn.length === 1 ? 'is' : 'are') + ' still clocked in. Clock out before closing?' +
+        '<br><button class="btn btn-ghost btn-sm" id="clockAllOut" style="margin-top:8px">Clock out ' + (stillIn.length === 1 ? S.esc(stillIn[0]) : 'everyone') + ' now</button></span></div>' : '') +
       (missing.length
         ? '<div class="pay-status owed"><span>No ' + (d.open ? 'closing' : 'opening') + ' ' + missing.join(' or ') + ' count yet. You can still ' + (d.open ? 'close' : 'start') + ' the day, but the report will have gaps.</span></div>'
         : '<div class="pay-status good"><span>Cash and stock counted. Ready.</span></div>') +
@@ -1528,11 +1549,21 @@
       '<button class="btn btn-accent btn-big btn-block" id="dayGo">' + (d.open ? 'Close day' : 'Start day') + '</button>');
     function wire() { wirePicker(pos, m.el, function (n) { who = n; }, function () { m.el.querySelector('#dayWho').innerHTML = namePicker(pos, who, 'dayNames'); wire(); }); }
     wire();
+    var cao = m.el.querySelector('#clockAllOut');
+    if (cao) cao.onclick = function () {
+      var t = new Date().toISOString();
+      stillIn.forEach(function (n) {
+        enqueue(pos, { qid: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'clock', name: n, direction: 'out', clientTime: t, note: 'Clocked out at Close day' });
+      });
+      flush(pos);
+      m.el.querySelector('#stillIn').outerHTML = '<div class="pay-status good"><span>' + S.esc(stillIn.join(', ')) + ' clocked out.</span></div>';
+      S.toast('Clocked out: ' + stillIn.join(', ') + '.');
+    };
     m.el.querySelector('#dayGo').onclick = function () {
       if (!who) { m.el.querySelector('#dayErr').innerHTML = '<div class="form-error">Pick your name.</div>'; return; }
       var dayNo = d.open ? d.number : d.next;
       var notesEl = m.el.querySelector('#dayNotes');
-      if (action === 'close') saveDemo(pos, who, true); // the demo counter is saved with the day, then reset
+      if (action === 'close') { saveDemo(pos, who, true); sendRefills(pos, who); drop('shn-countdraft-' + pos.eventId); pos.countState = null; } // demo counter + refill requests go with the day, then reset
       enqueue(pos, { qid: 'D' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'day',
         day: { action: action, by: who, notes: notesEl ? notesEl.value.trim() : '', clientTime: new Date().toISOString() } });
       m.close();
@@ -1581,27 +1612,32 @@
   /* ---------------- stock count page */
   function renderCount(pos) {
     var root = pos.el.querySelector('#pos');
-    var st = pos.countState = pos.countState || { purpose: 'Spot', by: '', values: {} };
+    var st = pos.countState = pos.countState || load('shn-countdraft-' + pos.eventId, null) || { purpose: 'Spot', by: '', values: {} };
+    var refills = load(refillKey(pos.eventId), {});
     var pend = pendingQty(pos);
     var prods = pos.data.products;
     root.innerHTML = '<div class="co count-page">' + pageTop(pos, 'Stock count') +
       '<section class="co-card">' + purposeHtml(pos, st.purpose) +
-      '<div class="count-tools"><button class="btn btn-ghost" id="countScan">' + ICONS.scan + ' Scan</button><button class="btn btn-ghost" id="refillBtn">Request a refill</button></div></section>' +
-      '<section class="co-card"><table class="count-tbl"><thead><tr><th>Product</th><th>Sellable</th><th>Demo</th><th></th></tr></thead><tbody>' +
+      '<div class="count-tools"><button class="btn btn-ghost" id="countScan">' + ICONS.scan + ' Scan</button></div></section>' +
+      '<section class="co-card"><table class="count-tbl"><thead><tr><th>Product</th><th>Sellable</th><th>Demo</th><th>Variance</th><th>Refill</th></tr></thead><tbody>' +
       prods.map(function (p, i) {
         var v = st.values[p.ref] || {};
+        var rq = refills[p.ref];
         return '<tr data-ref="' + S.esc(p.ref) + '"><td class="ct-name">' + S.esc(p.name) + '</td>' +
           '<td><input class="input ct-in" data-k="s" data-i="' + i + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(v.s == null ? '' : v.s) + '"></td>' +
           '<td>' + (p.demo ? '<input class="input ct-in" data-k="d" data-i="' + i + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(v.d == null ? '' : v.d) + '">' : '<span class="muted small">–</span>') + '</td>' +
-          '<td class="ct-mark"></td></tr>';
-      }).join('') + '</tbody></table></section>' +
+          '<td class="ct-mark"></td>' +
+          '<td><input class="input ct-in rf" data-rf="' + S.esc(p.ref) + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(rq ? rq : '') + '" aria-label="Refill quantity"></td></tr>';
+      }).join('') + '</tbody></table>' +
+      '<p class="small muted" style="margin:8px 0 0">Refill: how many more you need. Kept on this phone and sent to your manager when the day is closed.</p></section>' +
       '<section class="co-card"><h3>Counted by <span class="req">required</span></h3><div id="countWho">' + namePicker(pos, st.by, 'countNames') + '</div></section>' +
       '<div id="countErr"></div><button class="btn btn-accent btn-big btn-block" id="countSave">Save count</button></div>';
     wireTop(pos, root);
     wirePurpose(root, st);
-    function wireWho() { wirePicker(pos, root, function (n) { st.by = n; }, function () { root.querySelector('#countWho').innerHTML = namePicker(pos, st.by, 'countNames'); wireWho(); }); }
+    function wireWho() { wirePicker(pos, root, function (n) { st.by = n; keep(); }, function () { root.querySelector('#countWho').innerHTML = namePicker(pos, st.by, 'countNames'); wireWho(); }); }
     wireWho();
     var inputs = Array.prototype.slice.call(root.querySelectorAll('.ct-in'));
+    function keep() { save('shn-countdraft-' + pos.eventId, st); }
     function mark(tr) {
       var ref = tr.getAttribute('data-ref');
       var p = product(pos, ref), v = st.values[ref] || {};
@@ -1617,8 +1653,16 @@
     inputs.forEach(function (inp, k) {
       inp.addEventListener('input', function () {
         var tr = inp.closest('tr'), ref = tr.getAttribute('data-ref');
+        inp.value = inp.value.replace(/[^0-9]/g, '');
+        if (inp.getAttribute('data-rf')) {
+          var r = load(refillKey(pos.eventId), {});
+          if (Number(inp.value) > 0) r[ref] = Number(inp.value); else delete r[ref];
+          save(refillKey(pos.eventId), r);
+          return;
+        }
         st.values[ref] = st.values[ref] || {};
-        st.values[ref][inp.getAttribute('data-k')] = inp.value.replace(/[^0-9]/g, '');
+        st.values[ref][inp.getAttribute('data-k')] = inp.value;
+        keep();
         mark(tr);
       });
       inp.addEventListener('keydown', function (e) {
@@ -1627,7 +1671,6 @@
     });
     Array.prototype.forEach.call(root.querySelectorAll('tbody tr'), mark);
     keepAboveKeyboard(root);
-    root.querySelector('#refillBtn').onclick = function () { openRefill(pos); };
     root.querySelector('#countScan').onclick = function () {
       openScanner(pos, { title: 'Scan a product to count it' }, function (code) {
         var hit = byBarcode(pos, code);
@@ -1655,6 +1698,7 @@
       var count = { id: 'K' + newSaleId().slice(1), countedBy: st.by, purpose: purposeOf(pos, st.purpose), lines: lines, clientTime: new Date().toISOString() };
       enqueue(pos, { qid: count.id, type: 'count', count: count });
       pos.countState = null;
+      drop('shn-countdraft-' + pos.eventId);
       S.toast('Count saved: ' + lines.length + ' product' + (lines.length === 1 ? '' : 's') + (off ? ', ' + off + ' with a variance.' : ', all correct.'));
       go(pos, 'home');
       flush(pos);
@@ -1761,43 +1805,15 @@
     };
   }
 
-  /* ---------------- refill request (from the stock count page) */
-  function openRefill(pos) {
-    var pend = pendingQty(pos);
-    var qty = {};
-    var prods = pos.data.products.slice().sort(function (a, b) { return (a.live - (pend[a.ref] || 0)) - (b.live - (pend[b.ref] || 0)); });
-    var m = modal('<div class="pay-head"><h2>Request a refill</h2><button class="link-btn" data-close>Cancel</button></div>' +
-      '<p class="small muted" style="margin-top:0">Lowest stock first. Enter how many of each you need.</p>' +
-      '<input class="input" id="rfSearch" type="search" placeholder="Search" style="margin-bottom:8px">' +
-      '<div class="refill-list" id="rfList">' + prods.map(function (p) {
-        var left = p.live - (pend[p.ref] || 0);
-        return '<div class="refill-item" data-name="' + S.esc(p.name.toLowerCase()) + '"><div><div class="cl-name">' + S.esc(p.name) + '</div><div class="small ' + (left <= 2 ? 'neg' : 'muted') + '">' + left + ' left</div></div>' +
-          '<input class="input ct-in" data-rq="' + S.esc(p.ref) + '" inputmode="numeric" placeholder="0"></div>';
-      }).join('') + '</div>' +
-      '<div class="field" style="margin-top:10px"><label for="rfNote">Note (optional)</label><input class="input" id="rfNote" placeholder="e.g. Needed before Saturday"></div>' +
-      '<h3 class="rs-title">Requested by</h3><div id="rfWho">' + namePicker(pos, '', 'rfNames') + '</div>' +
-      '<div id="rfErr"></div><button class="btn btn-accent btn-big btn-block" id="rfSave">Send request</button>');
-    var who = '';
-    function wire() { wirePicker(pos, m.el, function (n) { who = n; }, function () { m.el.querySelector('#rfWho').innerHTML = namePicker(pos, who, 'rfNames'); wire(); }); }
-    wire();
-    m.el.querySelector('#rfSearch').oninput = function () {
-      var q = this.value.trim().toLowerCase();
-      Array.prototype.forEach.call(m.el.querySelectorAll('.refill-item'), function (x) { x.hidden = q && x.getAttribute('data-name').indexOf(q) < 0; });
-    };
-    Array.prototype.forEach.call(m.el.querySelectorAll('[data-rq]'), function (x) {
-      x.oninput = function () { x.value = x.value.replace(/[^0-9]/g, ''); qty[x.getAttribute('data-rq')] = Number(x.value) || 0; };
-    });
-    m.el.querySelector('#rfSave').onclick = function () {
-      var lines = Object.keys(qty).filter(function (r) { return qty[r] > 0; }).map(function (r) { return { ref: r, qty: qty[r] }; });
-      var note = m.el.querySelector('#rfNote').value.trim();
-      var err = !lines.length && !note ? 'Enter the quantities you need.' : !who ? 'Pick your name.' : '';
-      if (err) { m.el.querySelector('#rfErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
-      var r = { id: 'Q' + newSaleId().slice(1), by: who, lines: lines, note: note, clientTime: new Date().toISOString() };
-      enqueue(pos, { qid: r.id, type: 'refill', refill: r });
-      m.close();
-      S.toast('Refill request sent: ' + lines.length + ' product' + (lines.length === 1 ? '' : 's') + '.');
-      flush(pos);
-    };
+  /* ---------------- refill quantities typed in the stock count: sent with Close day, then cleared */
+  function sendRefills(pos, by) {
+    var r = load(refillKey(pos.eventId), {});
+    var lines = Object.keys(r).filter(function (k) { return r[k] > 0 && product(pos, k); }).map(function (k) { return { ref: k, qty: r[k] }; });
+    drop(refillKey(pos.eventId));
+    if (!lines.length) return false;
+    var req = { id: 'Q' + newSaleId().slice(1), by: by || '', lines: lines, note: '', clientTime: new Date().toISOString() };
+    enqueue(pos, { qid: req.id, type: 'refill', refill: req });
+    return true;
   }
 
   /* ---------------- demo counter: plays per demo game + customers activated, kept on this phone until saved */
@@ -1820,8 +1836,8 @@
     var root = pos.el.querySelector('#pos');
     var demos = pos.data.products.filter(function (p) { return p.demo > 0; });
     var d = demoState(pos);
-    root.innerHTML = '<div class="co demo-page">' + pageTop(pos, 'Demo counter') +
-      '<section class="co-card demo-cust"><div><b>Customers activated</b><div class="small muted">People who played or got a demo at the stand</div></div>' +
+    root.innerHTML = '<div class="co demo-page">' + pageTop(pos, 'Demo counter', '<button class="btn btn-ghost btn-sm" id="demoSave">Save</button>') +
+      '<section class="co-card demo-cust"><div><b>Customers activated</b><div class="small muted">People who played a game</div></div>' +
       '<div class="qty big-qty"><button id="custDec" aria-label="One less">−</button><span id="custN">' + d.customers + '</span><button id="custInc" aria-label="One more">+</button></div></section>' +
       (demos.length ? '<p class="small muted">Tap a game each time it is played. Counts stay on this phone until the day is closed (or you press Save).</p>' +
         '<div class="tiles demo-tiles">' + demos.map(function (p) {
@@ -1833,7 +1849,7 @@
             '<span class="tile-name">' + S.esc(p.name) + '</span></div>';
         }).join('') + '</div>'
         : '<div class="card empty"><p class="muted">No demo units in this event. Demo quantities are set in the Listing tab (Demo Qty).</p></div>') +
-      '<div class="demo-foot"><span class="small muted">Total <b>' + d.total + '</b> plays</span><button class="btn btn-ghost" id="demoSave">Save now</button></div></div>';
+      '<div class="demo-foot"><span class="small muted">Total <b>' + d.total + '</b> plays</span></div></div>';
     wireTop(pos, root);
     function bump(ref, delta) {
       var s2 = demoState(pos);

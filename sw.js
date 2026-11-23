@@ -1,7 +1,7 @@
 /* SHN LEB Events — offline support: keeps the app and product pictures on the device. */
-var CACHE = 'shn-leb-events-v7';
+var CACHE = 'shn-leb-events-v8';
 var SHELL = ['./', 'index.html', 'config.js', 'assets/app.css', 'assets/app.js', 'assets/pos.js', 'assets/vendor/qrcode.js', 'assets/vendor/zxing.min.js', 'assets/whish.png',
-  'assets/logo-white.png', 'assets/logo-dark.png', 'assets/icon-64.png', 'assets/icon-192.png'];
+  'assets/logo-white.png', 'assets/logo-round.png', 'assets/logo-dark.png', 'assets/icon-64.png', 'assets/icon-192.png'];
 
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); }));

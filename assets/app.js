@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.8.0';
+  var APP_VERSION = '1.8.1';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var DRAFT_TABS = [
@@ -581,12 +581,24 @@
       '<div class="field"><label for="iFocus">Focus games</label><div class="focus-add"><input class="input" id="iFocus" list="catNames" placeholder="Type to search the SHN Catalogue" autocomplete="off">' +
       '<button type="button" class="btn btn-ghost" id="focusAdd">Add</button></div><datalist id="catNames"></datalist><div class="chips focus-chips" id="focusChips"></div></div>' +
       '<div class="info-grid">' + INFO_FORM.slice(10).map(field).join('') + '</div></section>' +
-      '<div class="info-save"><span class="small muted" id="infoState">Nothing to fill is mandatory.</span><div id="infoErr"></div>' +
-      '<button class="btn btn-primary" id="infoSave" type="submit">Save info</button></div>' +
+      '<div class="info-save"><span class="small muted">Nothing is mandatory. Changes save by themselves.</span><span class="autosave ok" id="infoState">Saved ✓</span></div>' +
       '</form>';
-    var dirty = false;
-    var stateEl = document.getElementById('infoState');
-    var markDirty = function () { dirty = true; stateEl.textContent = 'Not saved yet.'; stateEl.className = 'small warn-text'; };
+    var saver = autosaver(document.getElementById('infoState'), function () {
+      Array.prototype.forEach.call(body.querySelectorAll('[data-info]'), function (x) { info[x.getAttribute('data-info')] = x.value.trim(); });
+      var data = { name: document.getElementById('iName').value.trim(), type: document.getElementById('iType').value,
+        venue: document.getElementById('iVenue').value.trim(), startDate: document.getElementById('iStart').value, endDate: document.getElementById('iEnd').value,
+        info: JSON.parse(JSON.stringify(info)) };
+      if (!data.name) return Promise.reject(new Error('Give the event a name.'));
+      if (data.endDate < data.startDate) return Promise.reject(new Error('The end date is before the start date.'));
+      // the page keeps working with what was typed; the server copy follows
+      Object.assign(ev, { name: data.name, type: data.type, venue: data.venue, startDate: data.startDate, endDate: data.endDate, info: data.info });
+      return api('saveInfo', { id: ev.id, event: data }).then(function (res) {
+        state.events = null;
+        if (res.event && res.event.settings) ev.settings = res.event.settings;
+        var h = document.querySelector('.event-head h1'); if (h) h.textContent = ev.name;
+      });
+    });
+    var markDirty = function () { saver.touch(); };
     Array.prototype.forEach.call(body.querySelectorAll('input,select,textarea'), function (x) { x.addEventListener('input', markDirty); });
     function drawFocus() {
       document.getElementById('focusChips').innerHTML = info.focusGames.length ? info.focusGames.map(function (g, i) {
@@ -617,29 +629,44 @@
       var a = document.getElementById('mapsOpen');
       if (/^https?:\/\//.test(maps.value.trim())) { a.href = maps.value.trim(); a.hidden = false; } else a.hidden = true;
     });
-    document.getElementById('infoForm').onsubmit = function (e) {
-      e.preventDefault();
-      Array.prototype.forEach.call(body.querySelectorAll('[data-info]'), function (x) { info[x.getAttribute('data-info')] = x.value.trim(); });
-      var btn = document.getElementById('infoSave'); btn.disabled = true; btn.textContent = 'Saving…';
-      api('saveInfo', { id: ev.id, event: { name: document.getElementById('iName').value.trim(), type: document.getElementById('iType').value,
-        venue: document.getElementById('iVenue').value.trim(), startDate: document.getElementById('iStart').value, endDate: document.getElementById('iEnd').value, info: info } })
-        .then(function (res) {
-          state.event = res.event; state.events = null;
-          dirty = false;
-          toast('Info saved.' + (ev.status === 'Draft' ? '' : ' The event sheet was updated too.'));
-          viewEvent(ev.id, 'info');
-        }).catch(function (err) {
-          btn.disabled = false; btn.textContent = 'Save info';
-          document.getElementById('infoErr').innerHTML = '<div class="form-error">' + esc(err.message) + '</div>';
-        });
+    document.getElementById('infoForm').onsubmit = function (e) { e.preventDefault(); saver.now(); };
+    Array.prototype.forEach.call(body.querySelectorAll('select,input[type="date"]'), function (x) { x.addEventListener('change', markDirty); });
+    leaveGuard(saver.leaving, saver.unsaved);
+  }
+
+  /* saves a moment after the last change; "Saving…" / "Saved ✓" / "Not saved" in the status */
+  function autosaver(statusEl, doSave) {
+    var timer = null, busy = false, again = false, failed = false, pending = false;
+    function show(cls, text) { if (statusEl && statusEl.isConnected) { statusEl.className = 'autosave ' + cls; statusEl.textContent = text; } }
+    function run() {
+      clearTimeout(timer); timer = null;
+      if (busy) { again = true; return; }
+      busy = true; pending = false; show('', 'Saving…');
+      var p;
+      try { p = doSave(); } catch (e) { p = Promise.reject(e); }
+      p.then(function () {
+        busy = false; failed = false;
+        if (again || pending) { again = false; run(); return; }
+        show('ok', 'Saved ✓');
+      }, function (err) {
+        busy = false; failed = true; again = false;
+        show('bad', err.offline ? 'Not saved: no connection. Retrying…' : 'Not saved: ' + err.message);
+        if (err.offline) timer = setTimeout(run, 8000);
+      });
+    }
+    return {
+      touch: function () { pending = true; show('', 'Editing…'); clearTimeout(timer); timer = setTimeout(run, 1200); },
+      now: run,
+      /* leaving the page: save right away; only ask if the last save failed */
+      leaving: function () { if (pending || timer) run(); return failed; },
+      unsaved: function () { return pending || !!timer || busy || failed; }
     };
-    leaveGuard(function () { return dirty; });
   }
 
   /* asks before leaving a page with unsaved changes */
-  var guardFn = null;
-  function leaveGuard(fn) { guardFn = fn; }
-  window.addEventListener('beforeunload', function (e) { if (guardFn && guardFn()) { e.preventDefault(); e.returnValue = ''; } });
+  var guardFn = null, unloadFn = null;
+  function leaveGuard(fn, onUnload) { guardFn = fn; unloadFn = onUnload || fn; }
+  window.addEventListener('beforeunload', function (e) { if (unloadFn && unloadFn()) { e.preventDefault(); e.returnValue = ''; } });
 
   /* ---------------- break-even simulation */
   function daysBetween(a, b) {
@@ -728,11 +755,15 @@
       past.map(function (e) { return '<option value="' + esc(e.id) + '"' + (b.refEvent === e.id ? ' selected' : '') + '>' + esc(e.name) + ' (' + e.avgUnitsPerDay + '/day)</option>'; }).join('') + '</select></div>' +
       inp('refUnits', 'Games a day at that event', 'games') + inp('growthPct', 'Growth expected', '%') +
       '</div></section>' +
-      '<div class="info-save"><span class="small muted" id="beState"></span><div id="beErr"></div><button class="btn btn-primary" id="beSave" type="submit">Save simulation</button></div>' +
+      '<div class="info-save"><span class="small muted" id="beHint"></span><span class="autosave ok" id="beState">Saved ✓</span></div>' +
       '</form><aside class="be-results" id="beResults"></aside></div>';
 
-    var dirty = false;
-    function markDirty() { dirty = true; var s2 = document.getElementById('beState'); s2.textContent = 'Not saved yet.'; s2.className = 'small warn-text'; }
+    var saver = autosaver(document.getElementById('beState'), function () {
+      var save = Object.assign({}, b, { others: b.others.filter(function (o) { return o.label || Number(o.amount); }), savedAt: new Date().toISOString() });
+      ev.breakeven = JSON.parse(JSON.stringify(save));
+      return api('saveBreakeven', { id: ev.id, breakeven: save });
+    });
+    function markDirty() { ev.breakeven = JSON.parse(JSON.stringify(b)); saver.touch(); }
     function drawOthers() {
       document.getElementById('others').innerHTML = b.others.length ? b.others.map(function (o, i) {
         return '<div class="other-row"><input class="input" data-ol="' + i + '" placeholder="e.g. Transport, bags, decoration" value="' + esc(o.label) + '">' +
@@ -807,23 +838,10 @@
     }
     drawOthers();
     drawResults();
-    var st0 = document.getElementById('beState');
-    st0.textContent = ev.breakeven ? 'Saved.' : 'Starting values: change them, then save.';
-    document.getElementById('beForm').onsubmit = function (e) {
-      e.preventDefault();
-      var btn = document.getElementById('beSave'); btn.disabled = true; btn.textContent = 'Saving…';
-      var save = Object.assign({}, b, { others: b.others.filter(function (o) { return o.label || Number(o.amount); }), savedAt: new Date().toISOString() });
-      api('saveBreakeven', { id: ev.id, breakeven: save }).then(function (res) {
-        state.event = res.event; dirty = false;
-        toast('Simulation saved.');
-        btn.disabled = false; btn.textContent = 'Save simulation';
-        var s3 = document.getElementById('beState'); s3.textContent = 'Saved.'; s3.className = 'small muted';
-      }).catch(function (err) {
-        btn.disabled = false; btn.textContent = 'Save simulation';
-        document.getElementById('beErr').innerHTML = '<div class="form-error">' + esc(err.message) + '</div>';
-      });
-    };
-    leaveGuard(function () { return dirty; });
+    document.getElementById('beHint').textContent = ev.breakeven ? 'Changes save by themselves.' : 'Starting values: change any of them and the simulation is saved.';
+    if (!ev.breakeven) document.getElementById('beState').textContent = '';
+    document.getElementById('beForm').onsubmit = function (e) { e.preventDefault(); saver.now(); };
+    leaveGuard(saver.leaving, saver.unsaved);
   }
 
   /* ---------------- inventory */
@@ -1273,7 +1291,7 @@
   var skipGuard = false;
   function onHash() {
     if (skipGuard) { skipGuard = false; return; }
-    if (guardFn && guardFn() && !window.confirm('You have changes that are not saved. Leave this page anyway?')) {
+    if (guardFn && guardFn() && !window.confirm('Your last change could not be saved (no connection?). Leave this page anyway?')) {
       skipGuard = true;
       location.hash = lastHash;
       return;
@@ -1282,7 +1300,7 @@
   }
 
   function render() {
-    guardFn = null;
+    guardFn = null; unloadFn = null;
     lastHash = location.hash;
     if (staffEvent) {
       if (!API_URL) return viewNotConfigured();

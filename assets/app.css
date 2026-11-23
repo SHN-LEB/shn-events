@@ -665,3 +665,45 @@ tr.flash td { background: #fff1ea; transition: background .3s; }
 .contact-row { padding: 8px 0; border-top: 1px solid #f0ebe3; }
 .contact-row:first-of-type { border-top: 0; }
 .summary-img { width: 100%; border-radius: 12px; border: 1px solid var(--line); margin-bottom: 10px; }
+
+/* ================================================================ v1.8.1 */
+/* staff link top bar: round logo, event name on up to 2 lines */
+.brand-round { display: none; height: 40px; width: 40px; }
+body.pos-mode .brand-logo, body.pos-mode .brand-sep, body.pos-mode .brand-name { display: none; }
+body.pos-mode .brand-round { display: block; }
+body.pos-mode .topbar-right { flex: 1; justify-content: flex-end; }
+body.pos-mode .topbar-event { max-width: none; flex: 1; margin-left: 0; white-space: normal; text-overflow: clip; line-height: 1.2;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+/* page titles centred on the page, whatever is on the left and right */
+.co-top { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; }
+.co-top > :first-child { justify-self: start; }
+.co-top > :last-child { justify-self: end; }
+.co-top .page-title { text-align: center; }
+/* search bar: scan icon centred */
+.pos-filters .search-wrap { margin-bottom: 8px; }
+.pos-filters .search-wrap .input { margin-bottom: 0; }
+/* refresh with a waiting / failed badge, next to the customer icon */
+.pos-bar { justify-content: flex-start; }
+.pos-bar-actions { width: 100%; }
+.icon-btn.btn-sm-h { width: 38px; height: 38px; position: relative; }
+.sync-dot { position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; font-size: 11px; font-weight: 800; color: #fff; display: flex; align-items: center; justify-content: center; }
+.sync-dot.warn { background: #e08a00; }
+.sync-dot.bad { background: var(--bad); }
+/* demo counter: 4 per row, smaller */
+.demo-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; gap: 6px !important; padding-bottom: 20px; }
+.demo-tiles .tile { padding: 5px; }
+.demo-tiles .tile-name { font-size: 10.5px; line-height: 1.2; font-weight: 600; margin-top: 4px; }
+.demo-tiles .tile-img .ph { font-size: 16px; }
+.demo-n { min-width: 24px; height: 24px; font-size: 12.5px; right: 3px; top: 3px; padding: 0 6px; }
+.demo-dec { width: 24px; height: 24px; font-size: 15px; left: 3px; top: 3px; }
+@media (min-width: 900px) { .demo-tiles { grid-template-columns: repeat(6, minmax(0, 1fr)) !important; } }
+/* stock count: 5 columns, centred */
+.count-tbl th:not(:first-child), .count-tbl td:not(:first-child) { text-align: center; }
+.count-tbl td .ct-in { margin: 0 auto; display: block; }
+.count-tbl .ct-mark { width: auto; }
+.count-tbl .ct-in.rf { border-color: #f2d6a8; background: #fffaf1; }
+@media (max-width: 600px) { .count-page .ct-in { width: 48px; padding: 6px 4px; } .count-page .ct-name { font-size: 12.5px; } }
+.shift-old { color: var(--bad); font-weight: 700; }
+.autosave { font-size: 13px; }
+.autosave.ok { color: var(--good); }
+.autosave.bad { color: var(--bad); }
