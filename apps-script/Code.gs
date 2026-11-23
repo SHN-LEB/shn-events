@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -20,7 +20,8 @@ const VAT_PCT = 11;   // prices include VAT; the VAT column is for reporting onl
 const LBP_STEP = 5000; // LBP change is rounded to this step
 
 const MASTER_TABS = {
-  Events: ['Event ID', 'Name', 'Type', 'Venue', 'Start Date', 'End Date', 'Status', 'Sheet URL', 'Sheet ID', 'Created At'],
+  Events: ['Event ID', 'Name', 'Type', 'Venue', 'Start Date', 'End Date', 'Status', 'Sheet URL', 'Sheet ID', 'Created At',
+    'Info (app)', 'Break-even (app)', 'Copy From', 'Days Sold', 'Avg Units / Day', 'Avg Sales / Day'],
   Settings: ['Setting', 'Value', 'Notes']
 };
 
@@ -32,6 +33,12 @@ const MASTER_SETTINGS = [
   ['DEFAULT_MAX_DISCOUNT_PCT', 20, 'Highest discount % a cashier can enter, copied into each new event'],
   ['DEFAULT_OPENING_CASH_USD', 0, 'Copied into each new event'],
   ['DEFAULT_OPENING_CASH_LBP', 0, 'Copied into each new event'],
+  ['MANAGER_PIN', '1234', 'Manager PIN for big returns and discounts above the max. Copied into each new event (changeable there). Change it now'],
+  ['RETURN_APPROVAL_USD', 51, 'Returns above this amount (USD) need the manager PIN'],
+  ['COMMISSION_THRESHOLD', 30, 'Price (USD) from which the higher commission applies. Copied into each new event'],
+  ['CASH_WARN_USD', 250, 'Warn when the drawer holds more than this (USD)'],
+  ['CASH_WARN_LBP', 3000000, 'Warn when the drawer holds more than this (LBP)'],
+  ['DEFAULT_STAFF_RATE', 3, 'Hourly rate (USD) suggested in the break-even simulation'],
   ['WHISH_PAY_LINK', 'https://whish.money/app/pay/WttWZdc0D', 'Link inside the Whish QR code shown for online payments. Paste a new link to change the QR; leave empty to hide the Whish button'],
   ['SHOP_DOMAIN', 'superheatedneurons.com', 'Website the POS takes product pictures from (matched by SKU = Ref Code)'],
   ['TRACKER_COUNTRY', 'LEB', 'Sales Tracker tab: Country'],
@@ -54,29 +61,37 @@ const MAX_ROWS = 1000; // rows prepared with dropdowns and formulas in event tab
 
 const EVENT_TYPES = ['Sales', 'Awareness'];
 
-/* Every tab of an event sheet. Settings is a key/value tab; the rest are tables. */
 /* Every tab of an event sheet. '' leaves an empty separator column between blocks.
-   Settings: A-C event settings, E-J staff list, L-P this event's catalogue.
+   Settings: A-C event settings, E-I staff list, K-O this event's catalogue.
+   (Events created before v1.8 have a Threshold column in the staff list and the catalogue in L-P: still read.)
    Listing:  A-G products from the catalogue, I-R external products, T all product names (hidden helper). */
 const STAFF_COL = 5;      // Settings!E
-const CATALOG_COL = 12;   // Settings!L
+const CATALOG_COL = 11;   // Settings!K
 const CONS_COL = 9;       // Listing!I
 const ALL_NAMES_COL = 20; // Listing!T
 /* Colour per column group: [tab, first col, last col, header colour, body colour] */
 const BLOCK_COLORS = [
   ['Settings', 1, 3, '#d9d9d9', '#f3f3f3'],                                   // event settings: grey
-  ['Settings', STAFF_COL, STAFF_COL + 5, '#c9daf8', '#eef4fd'],               // staff: blue
+  ['Settings', STAFF_COL, STAFF_COL + 4, '#c9daf8', '#eef4fd'],               // staff: blue
   ['Settings', CATALOG_COL, CATALOG_COL + 4, '#d9ead3', '#f1f8ee'],           // catalogue: green
-  ['Listing', 1, 7, '#c9daf8', '#eef4fd'],                                    // products: blue
+  ['Listing', 1, 4, '#a4c2f4', '#c9daf8'],                                    // products, automatic part: darker blue
+  ['Listing', 5, 7, '#c9daf8', '#eef4fd'],                                    // products: blue
   ['Listing', CONS_COL, CONS_COL + 9, '#fce5cd', '#fef5ec'],                  // external products: orange
   ['Stock Moves', 1, 5, '#d9ead3', '#f1f8ee']                                 // stock moves: green
 ];
 /* Columns filled by formulas: shown in grey italic so nobody types in them */
 const AUTO_COLS = [['Listing', 1, 4], ['Stock Moves', 2, 2]];
 
+const DAYS_HEADERS = ['Day', 'Date', 'Opened At', 'Opened By', 'Closed At', 'Closed By', 'Opening Cash Diff USD', 'Opening Cash Diff LBP', 'Opening Stock Diff (units)', 'Closing Cash Diff USD', 'Closing Cash Diff LBP', 'Closing Stock Diff (units)', 'Cash Variance During Day USD', 'Cash Variance During Day LBP', 'Stock Variance During Day (units)', 'Demo Units Missing (closing)', 'Sales (USD)', 'Online (USD)', 'Units Sold', 'Status', 'Day Notes', 'Demo Plays', 'Customers Activated'];
+const CUSTOMERS_HEADERS = ['Customer ID', 'Added At', 'Name', 'Phone', 'Email', 'Note', 'Sale ID', 'Added By', 'Day'];
+const REFILLS_HEADERS = ['Request ID', 'Requested At', 'Requested By', 'Ref Code', 'Product', 'Qty', 'Note', 'Day', 'Status'];
+const DEMOS_HEADERS = ['Entry ID', 'Saved At', 'Day', 'Ref Code', 'Product', 'Plays', 'Saved By'];
+/* tabs added after v1.7: created on first use in older event sheets */
+const LATE_TABS = { Customers: CUSTOMERS_HEADERS, Refills: REFILLS_HEADERS, Demos: DEMOS_HEADERS };
+
 const EVENT_TABS = [
   ['Settings', ['Setting', 'Value', 'Notes', '',
-    'Staff Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/item)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/item)', 'Active (Y/N)', '',
+    'Staff Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/item)', 'Commission At/Over Threshold (USD/item)', 'Active (Y/N)', '',
     'Catalogue: Product', 'Ref Code', 'Price (USD)', 'Category', 'Game Family']],
   ['Listing', ['Ref Code', 'Category', 'Game Family', 'Price (USD)', 'Product', 'Opening Qty', 'Demo Qty', '',
     'External Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL', '',
@@ -86,8 +101,11 @@ const EVENT_TABS = [
   ['Shifts', ['Date', 'Employee', 'Clock In', 'Clock Out', 'Hours', 'Note']],
   ['Cash', ['Entry ID', 'Date Time', 'Kind', 'USD', 'LBP', 'Counted / Handed By', 'Handed To', 'Note', 'Expected USD', 'Expected LBP', 'Diff USD', 'Diff LBP', 'Purpose', 'Day', 'Banknotes']],
   ['Counts', ['Count ID', 'Counted At', 'Ref Code', 'Product', 'Expected Sellable', 'Counted Sellable', 'Diff Sellable', 'Expected Demo', 'Counted Demo', 'Diff Demo', 'Counted By', 'Purpose', 'Day']],
-  ['Days', ['Day', 'Date', 'Opened At', 'Opened By', 'Closed At', 'Closed By', 'Opening Cash Diff USD', 'Opening Cash Diff LBP', 'Opening Stock Diff (units)', 'Closing Cash Diff USD', 'Closing Cash Diff LBP', 'Closing Stock Diff (units)', 'Cash Variance During Day USD', 'Cash Variance During Day LBP', 'Stock Variance During Day (units)', 'Demo Units Missing (closing)', 'Sales (USD)', 'Online (USD)', 'Units Sold', 'Status']],
+  ['Days', DAYS_HEADERS],
   ['Expenses', ['Expense ID', 'Date', 'Type', 'Description', 'Amount USD', 'Amount LBP', 'Total USD', 'Added At']],
+  ['Customers', CUSTOMERS_HEADERS],
+  ['Refills', REFILLS_HEADERS],
+  ['Demos', DEMOS_HEADERS],
   ['P&L', ['Line', 'USD']],
   ['Sales Tracker', ['Date', 'Product Code', 'Description', 'Qty', 'Total Sales $', 'Country', 'Channel', 'Channel Type', 'Warehouse', 'Delivered by', 'Sales Date', 'Invoice Date', 'Invoice number', 'Parent Account', 'Customer', 'Branch', 'Product Ref.', 'Description', 'Quantity', 'Unit Amount HT (Invoiced)', 'Currency', 'Total Amount HT (Invoiced)', 'Total VAT (Invoiced)']]
 ];
@@ -132,6 +150,7 @@ function ensureMasterTabs_(ss) {
     let sh = ss.getSheetByName(name);
     if (!sh) sh = ss.insertSheet(name);
     if (sh.getLastRow() === 0) writeHeader_(sh, MASTER_TABS[name]);
+    else ensureHeaders_(sh, MASTER_TABS[name]);
   });
   const settings = ss.getSheetByName('Settings');
   const have = {};
@@ -141,6 +160,24 @@ function ensureMasterTabs_(ss) {
   });
   const extra = ss.getSheetByName('Sheet1');
   if (extra && ss.getSheets().length > 1) ss.deleteSheet(extra);
+}
+
+/* adds header cells that a newer version expects (existing columns are never moved) */
+function ensureHeaders_(sh, headers) {
+  const have = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0];
+  headers.forEach(function (h, i) {
+    if (h && !String(have[i] || '').trim()) sh.getRange(1, i + 1).setValue(h).setFontWeight('bold').setBackground('#eef1f6');
+  });
+}
+
+/* a tab added in a newer version: created the first time an older event sheet needs it */
+function lateTab_(ss, name) {
+  let sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    writeHeader_(sh, LATE_TABS[name]);
+  }
+  return sh;
 }
 
 function writeHeader_(sh, headers) {
@@ -179,8 +216,16 @@ function route_(req) {
     case 'adminLogin': return adminLogin_(req);
     case 'listEvents': requireAdmin_(req); return { events: listEvents_() };
     case 'createEvent': requireAdmin_(req); return { event: createEvent_(req) };
+    case 'duplicateEvent': requireAdmin_(req); return { event: duplicateEvent_(req) };
+    case 'launchEvent': requireAdmin_(req); return { event: launchEvent_(req.id) };
+    case 'deleteDraft': requireAdmin_(req); return { deleted: deleteDraft_(req.id) };
+    case 'saveInfo': requireAdmin_(req); return { event: saveInfo_(req.id, req.event || {}) };
+    case 'saveBreakeven': requireAdmin_(req); return { event: saveBreakeven_(req.id, req.breakeven) };
+    case 'catalogueNames': requireAdmin_(req); return { names: catalogueNames_() };
+    case 'overview': requireAdmin_(req); return { overview: overview_() };
+    case 'setRefill': requireAdmin_(req); return { refill: setRefill_(req.id, req.requestId, req.status, req.toStock) };
     case 'getEvent': requireAdmin_(req); return { event: getEvent_(req.id) };
-    case 'getInventory': requireAdmin_(req); return { inventory: getInventory_(req.id) };
+    case 'getInventory': requireAdmin_(req); return { inventory: withBarcodes_(getInventory_(req.id)) };
     case 'setEventStatus': requireAdmin_(req); return { event: setEventStatus_(req.id, req.status) };
     case 'eventPublic': return { event: eventPublic_(req.eventId) };
     case 'staffLogin': return staffLogin_(req);
@@ -194,6 +239,10 @@ function route_(req) {
     case 'recordCount': requireEventAccess_(req, req.eventId); return { count: recordCount_(req.eventId, req.count) };
     case 'recordCash': requireEventAccess_(req, req.eventId); return { cash: recordCash_(req.eventId, req.cash) };
     case 'dayAction': requireEventAccess_(req, req.eventId); return { day: dayAction_(req.eventId, req.day) };
+    case 'recordCustomer': requireEventAccess_(req, req.eventId); return { customer: recordCustomer_(req.eventId, req.customer) };
+    case 'recordRefill': requireEventAccess_(req, req.eventId); return { refill: recordRefill_(req.eventId, req.refill) };
+    case 'recordDemo': requireEventAccess_(req, req.eventId); return { demo: recordDemo_(req.eventId, req.demo) };
+    case 'daySummary': requireEventAccess_(req, req.eventId); return { summary: daySummary_(req.eventId, req.day) };
     case 'eventReport': requireAdmin_(req); return { report: eventReport_(req.id) };
     case 'addExpense': requireAdmin_(req); return { expense: addExpense_(req.id, req.expense) };
     case 'deleteExpense': requireAdmin_(req); return { deleted: deleteExpense_(req.id, req.expenseId) };
@@ -298,9 +347,22 @@ function rowToEvent_(r) {
     status: String(r[6] || 'Open'),
     sheetUrl: String(r[7]),
     sheetId: String(r[8]),
-    createdAt: r[9] instanceof Date ? r[9].toISOString() : String(r[9] || '')
+    createdAt: r[9] instanceof Date ? r[9].toISOString() : String(r[9] || ''),
+    info: parseJson_(r[10], {}),
+    breakeven: parseJson_(r[11], null),
+    copyFrom: String(r[12] || ''),
+    daysSold: Number(r[13]) || 0,
+    avgUnitsPerDay: Number(r[14]) || 0,
+    avgSalesPerDay: Number(r[15]) || 0
   };
 }
+
+function parseJson_(v, fallback) {
+  if (v === '' || v == null) return fallback;
+  try { return JSON.parse(String(v)); } catch (e) { return fallback; }
+}
+
+function isDraft_(ev) { return ev.status === 'Draft'; }
 
 function listEvents_() {
   const values = eventsSheet_().getDataRange().getValues();
@@ -318,43 +380,158 @@ function findEventRow_(id) {
 
 /* ------------------------------------------------------------------ events */
 
-function createEvent_(req) {
-  const name = String(req.name || '').trim();
-  const venue = String(req.venue || '').trim();
-  const type = EVENT_TYPES.indexOf(req.type) >= 0 ? req.type : 'Sales';
-  const start = String(req.startDate || '');
-  const end = String(req.endDate || '');
+function eventFields_(req, base) {
+  base = base || {};
+  const name = String(req.name != null ? req.name : base.name || '').trim();
+  const venue = String(req.venue != null ? req.venue : base.venue || '').trim();
+  const type = EVENT_TYPES.indexOf(req.type) >= 0 ? req.type : (base.type || 'Sales');
+  const start = String(req.startDate || base.startDate || '');
+  const end = String(req.endDate || base.endDate || '');
   if (!name) throw userError_('Give the event a name.', 'invalid');
   if (!isIsoDate_(start) || !isIsoDate_(end)) throw userError_('Pick a start and an end date.', 'invalid');
   if (end < start) throw userError_('The end date is before the start date.', 'invalid');
+  return { name: name.slice(0, 80), venue: venue.slice(0, 80), type: type, startDate: start, endDate: end };
+}
 
+/* A new event starts as a draft: it lives only in the master sheet (no Google Sheet, no PIN) until it is launched. */
+function createEvent_(req, extra) {
+  const f = eventFields_(req);
+  extra = extra || {};
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
     const existing = listEvents_().map(function (e) { return e.id; });
     let id;
     do { id = newId_(); } while (existing.indexOf(id) >= 0);
-
-    const catalogue = loadCatalogue_();
-    const folder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty('FOLDER_ID'));
-    const ss = SpreadsheetApp.create('SHN LEB Event — ' + name + ' (' + start + ')');
-    DriveApp.getFileById(ss.getId()).moveTo(folder);
-
-    const event = { id: id, name: name, type: type, venue: venue, startDate: start, endDate: end, status: 'Open' };
-    buildEventSheet_(ss, event, catalogue);
-
     const createdAt = new Date();
-    eventsSheet_().appendRow([id, name, type, venue, start, end, 'Open', ss.getUrl(), ss.getId(), createdAt]);
-    // keep dates as plain text so time zones never shift them
+    const info = extra.info || {};
     const sh = eventsSheet_();
-    sh.getRange(sh.getLastRow(), 5, 1, 2).setNumberFormat('@').setValues([[start, end]]);
-
-    event.sheetUrl = ss.getUrl();
-    event.sheetId = ss.getId();
-    event.createdAt = createdAt.toISOString();
-    return event;
+    const r = sh.getLastRow() + 1;
+    sh.getRange(r, 1, 1, 13).setNumberFormat('@');
+    sh.getRange(r, 1, 1, 13).setValues([[id, f.name, f.type, f.venue, f.startDate, f.endDate, 'Draft', '', '', '',
+      JSON.stringify(info), extra.breakeven ? JSON.stringify(extra.breakeven) : '', extra.copyFrom || '']]);
+    sh.getRange(r, 10).setNumberFormat('yyyy-mm-dd hh:mm').setValue(createdAt);
+    return rowToEvent_(sh.getRange(r, 1, 1, 16).getValues()[0]);
   } finally {
     lock.releaseLock();
+  }
+}
+
+/* Copy of an event as a new draft: same info and break-even; products, quantities, demo units and staff are copied at launch. */
+function duplicateEvent_(req) {
+  const src = rowToEvent_(findEventRow_(req.id).values);
+  const copyFrom = isDraft_(src) ? src.copyFrom : src.id;
+  return createEvent_({ name: req.name, type: src.type, venue: req.venue != null ? req.venue : src.venue, startDate: req.startDate, endDate: req.endDate },
+    { info: src.info || {}, breakeven: src.breakeven, copyFrom: copyFrom });
+}
+
+function deleteDraft_(id) {
+  const found = findEventRow_(id);
+  if (!isDraft_(rowToEvent_(found.values))) throw userError_('Only a draft can be deleted. Close a launched event instead.', 'invalid');
+  found.sheet.deleteRow(found.row);
+  return true;
+}
+
+/* Name, dates, venue, type and the Info page. On a launched event the sheet's Settings follow. */
+function saveInfo_(id, data) {
+  const found = findEventRow_(id);
+  const ev = rowToEvent_(found.values);
+  const f = eventFields_(data, ev);
+  const info = cleanInfo_(data.info || ev.info || {});
+  found.sheet.getRange(found.row, 2, 1, 5).setNumberFormat('@').setValues([[f.name, f.type, f.venue, f.startDate, f.endDate]]);
+  found.sheet.getRange(found.row, 11).setNumberFormat('@').setValue(JSON.stringify(info));
+  if (!isDraft_(ev) && ev.sheetId) {
+    setEventSettings_(SpreadsheetApp.openById(ev.sheetId), {
+      'Event Name': f.name, 'Type': f.type, 'Venue': f.venue, 'Start Date': f.startDate, 'End Date': f.endDate, 'Opening Hours': info.openingHours || ''
+    });
+  }
+  return getEvent_(id);
+}
+
+const INFO_FIELDS = ['description', 'openingHours', 'mapsLink', 'standLocation', 'standSize', 'organizerName', 'organizerPhone', 'organizerEmail',
+  'setupTime', 'teardownTime', 'objectives', 'notes'];
+
+function cleanInfo_(info) {
+  const out = {};
+  INFO_FIELDS.forEach(function (k) { if (info[k] != null && String(info[k]).trim()) out[k] = String(info[k]).slice(0, 3000); });
+  if (Array.isArray(info.focusGames)) out.focusGames = info.focusGames.map(String).filter(Boolean).slice(0, 60);
+  return out;
+}
+
+function saveBreakeven_(id, be) {
+  const found = findEventRow_(id);
+  const text = JSON.stringify(be || {});
+  if (text.length > 20000) throw userError_('The break-even simulation is too long to save.', 'invalid');
+  found.sheet.getRange(found.row, 12).setNumberFormat('@').setValue(text);
+  return getEvent_(id);
+}
+
+/* writes key/value rows in an event's Settings tab (adds the row if missing) */
+function setEventSettings_(ss, map) {
+  const sh = ss.getSheetByName('Settings');
+  const rows = sh.getRange(1, 1, Math.max(1, sh.getLastRow()), 2).getValues();
+  Object.keys(map).forEach(function (k) {
+    let at = -1;
+    for (let i = 1; i < rows.length; i++) if (String(rows[i][0]).trim() === k) { at = i; break; }
+    if (at < 0) {
+      // first empty row of column A
+      at = rows.length;
+      for (let i = 1; i < rows.length; i++) if (!String(rows[i][0]).trim()) { at = i; break; }
+      sh.getRange(at + 1, 1).setValue(k).setFontWeight('bold');
+      if (at >= rows.length) rows.push([k, '']); else rows[at][0] = k;
+    }
+    sh.getRange(at + 1, 2).setNumberFormat('@').setValue(String(map[k]));
+  });
+}
+
+function sheetName_(ev) {
+  return ev.startDate.replace(/-/g, '') + ' - ' + ev.name;
+}
+
+/* Launch: creates the event's Google Sheet. Until then the event is a draft. */
+function launchEvent_(id) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const found = findEventRow_(id);
+    const ev = rowToEvent_(found.values);
+    if (!isDraft_(ev)) return getEvent_(id);
+    const catalogue = loadCatalogue_();
+    const folder = DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty('FOLDER_ID'));
+    const ss = SpreadsheetApp.create(sheetName_(ev));
+    DriveApp.getFileById(ss.getId()).moveTo(folder);
+    ev.openingHours = (ev.info && ev.info.openingHours) || '';
+    buildEventSheet_(ss, ev, catalogue);
+    if (ev.copyFrom) {
+      try { copyFromEvent_(ev.copyFrom, ss); } catch (e) { console.error(e); }
+    }
+    found.sheet.getRange(found.row, 7, 1, 3).setValues([['Open', ss.getUrl(), ss.getId()]]);
+    return getEvent_(id);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* products with their opening and demo quantities, external products and the staff list of an earlier event */
+function copyFromEvent_(srcId, ss) {
+  const src = rowToEvent_(findEventRow_(srcId).values);
+  if (!src.sheetId) return;
+  const from = SpreadsheetApp.openById(src.sheetId);
+  const lst = from.getSheetByName('Listing').getDataRange().getValues().slice(1);
+  const prods = lst.filter(function (r) { return String(r[4] || '').trim(); }).map(function (r) { return [r[4], r[5], r[6]]; });
+  const K = CONS_COL - 1;
+  const ext = lst.filter(function (r) { return String(r[K] || '').trim(); }).map(function (r) { return r.slice(K, K + 10); });
+  const to = ss.getSheetByName('Listing');
+  if (prods.length) to.getRange(2, 5, prods.length, 3).setValues(prods);
+  if (ext.length) {
+    to.getRange(2, CONS_COL + 1, ext.length, 1).setNumberFormat('@');
+    to.getRange(2, CONS_COL, ext.length, 10).setValues(ext);
+  }
+  const staff = readStaff_(from);
+  if (staff.length) {
+    ss.getSheetByName('Settings').getRange(2, STAFF_COL, staff.length, 5).setValues(staff.map(function (p) {
+      return [p.name, p.hourlyRate, p.commissionUnder, p.commissionOver, p.active ? 'Y' : 'N'];
+    }));
   }
 }
 
@@ -373,13 +550,15 @@ function buildEventSheet_(ss, ev, catalogue) {
     ['Venue', ev.venue, ''],
     ['Start Date', ev.startDate, 'YYYY-MM-DD'],
     ['End Date', ev.endDate, 'YYYY-MM-DD'],
-    ['Opening Hours', '', 'e.g. Weekdays 4pm-11pm, weekends 1pm-11pm'],
+    ['Opening Hours', ev.openingHours || '', 'e.g. Weekdays 4pm-11pm, weekends 1pm-11pm. Staff access ends 12h after the last closing time'],
     ['Exchange Rate (LBP per USD)', Number(masterSetting_('DEFAULT_FX_RATE')) || 89500, ''],
     ['Opening Cash USD', Number(masterSetting_('DEFAULT_OPENING_CASH_USD')) || 0, 'Cash in the drawer at the start'],
     ['Opening Cash LBP', Number(masterSetting_('DEFAULT_OPENING_CASH_LBP')) || 0, 'Cash in the drawer at the start'],
     ['Max Discount %', Number(masterSetting_('DEFAULT_MAX_DISCOUNT_PCT')) || 0, 'Highest discount a cashier can enter'],
     ['COGS %', Number(masterSetting_('COGS_PCT')) || 0, 'Cost of goods as % of selling price, locked for this event'],
     ['PIN', pin, '4 digits, shared with the event staff'],
+    ['Manager PIN', String(masterSetting_('MANAGER_PIN') || ''), 'For returns above $' + (Number(masterSetting_('RETURN_APPROVAL_USD')) || 0) + ' and discounts above the max'],
+    ['Commission Threshold (USD)', Number(masterSetting_('COMMISSION_THRESHOLD')) || 0, 'Items paid at or above this price earn the higher commission'],
     ['Daily Target Qty', '', 'Optional'],
     ['Daily Target Sales (USD)', '', 'Optional']
   ];
@@ -390,7 +569,7 @@ function buildEventSheet_(ss, ev, catalogue) {
   sh.getRange(2, 1, settings.length, 1).setFontWeight('bold');
   sh.setColumnWidth(1, 210);
   sh.setColumnWidth(3, 300);
-  ss.getSheetByName('P&L').getRange(2, 1).setValue('Built automatically in a later phase.');
+  ss.getSheetByName('P&L').getRange(2, 1).setValue('Filled automatically when a business day is closed.');
   buildInventoryTabs_(ss, catalogue || []);
 }
 
@@ -477,7 +656,7 @@ function buildInventoryTabs_(ss, catalogue) {
   const list = function (values) {
     return SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(false).build();
   };
-  const C = colLetter_(CATALOG_COL), C2 = colLetter_(CATALOG_COL + 4); // L..P
+  const C = colLetter_(CATALOG_COL), C2 = colLetter_(CATALOG_COL + 4); // K..O
   const catRange = 'Settings!' + C + '2:' + C2;
 
   // Settings: staff block + this event's catalogue (prices locked for the event)
@@ -489,7 +668,7 @@ function buildInventoryTabs_(ss, catalogue) {
   }
   set.setColumnWidth(CATALOG_COL, 320);
   set.setColumnWidth(STAFF_COL, 160);
-  set.getRange(2, STAFF_COL + 5, MAX_ROWS, 1).setDataValidation(list(['Y', 'N']));
+  set.getRange(2, STAFF_COL + 4, MAX_ROWS, 1).setDataValidation(list(['Y', 'N']));
   set.getRange(2, STAFF_COL + 1, MAX_ROWS, 1).setNumberFormat('$#,##0.00');
 
   // Listing: Ref Code, Category, Game Family, Price looked up from the product name
@@ -536,12 +715,12 @@ function buildInventoryTabs_(ss, catalogue) {
     warn(ss.getSheetByName(a[0]).getRange(1, a[1], MAX_ROWS + 1, a[2] - a[1] + 1), 'Filled automatically from the product name');
   });
   warn(lst.getRange(1, ALL_NAMES_COL, MAX_ROWS + 1, 1), 'Automatic list for the Stock Moves dropdown');
-  ['Settings', 'Listing', 'Stock Moves', 'Sales', 'Shifts', 'Cash', 'Counts', 'Days', 'Expenses', 'P&L', 'Sales Tracker'].forEach(function (t) {
+  EVENT_TABS.map(function (t) { return t[0]; }).forEach(function (t) {
     const sh = ss.getSheetByName(t);
     warn(sh.getRange(1, 1, 1, sh.getMaxColumns()), 'Column headers used by the app');
   });
   warn(set.getRange(2, 1, 1, 3), 'Event ID: do not change');
-  ['Sales', 'Shifts', 'Cash', 'Counts', 'Days'].forEach(function (t) {
+  ['Sales', 'Shifts', 'Cash', 'Counts', 'Days', 'Customers', 'Refills', 'Demos'].forEach(function (t) {
     warn(ss.getSheetByName(t).getRange(2, 1, MAX_ROWS, ss.getSheetByName(t).getMaxColumns()), 'Written by the app');
   });
 
@@ -555,6 +734,7 @@ function buildInventoryTabs_(ss, catalogue) {
 /* Live stock for the Inventory tab (and the POS later). */
 function getInventory_(id, asOf) {
   const ev = rowToEvent_(findEventRow_(id).values);
+  if (isDraft_(ev)) throw userError_('Launch the event first: its Google Sheet is created at launch.', 'draft');
   const ss = SpreadsheetApp.openById(ev.sheetId);
   ['Listing', 'Stock Moves', 'Sales'].forEach(function (t) {
     if (!ss.getSheetByName(t)) throw userError_('This event was created with an older version of the app. Create a new event.', 'old_event');
@@ -640,19 +820,65 @@ function getInventory_(id, asOf) {
   return { items: list, warnings: warnings };
 }
 
+/* Staff list. Events created before v1.8 have a per-person Threshold column (read, still honoured). */
 function readStaff_(ss) {
   const sh = ss.getSheetByName('Settings');
   const K = STAFF_COL - 1;
-  return sh.getDataRange().getValues().slice(1).filter(function (r) { return String(r[K] || '').trim(); }).map(function (r) {
+  const values = sh.getDataRange().getValues();
+  const old = /threshold/i.test(String(values[0][K + 3] || '')) && !/at\/over/i.test(String(values[0][K + 3] || ''));
+  return values.slice(1).filter(function (r) { return String(r[K] || '').trim(); }).map(function (r) {
     return {
       name: String(r[K]).trim(),
       hourlyRate: parseMoney_(r[K + 1]),
       commissionUnder: parseMoney_(r[K + 2]),
-      threshold: parseMoney_(r[K + 3]),
-      commissionOver: parseMoney_(r[K + 4]),
-      active: String(r[K + 5] || 'Y').trim().toUpperCase() !== 'N'
+      threshold: old ? parseMoney_(r[K + 3]) : null,
+      commissionOver: parseMoney_(old ? r[K + 4] : r[K + 3]),
+      active: String((old ? r[K + 5] : r[K + 4]) || 'Y').trim().toUpperCase() !== 'N'
     };
   });
+}
+
+/* the commission threshold of an event: its Settings row, else (older events) each person's own, else the master default */
+function commissionThreshold_(settings, person) {
+  const v = settings['Commission Threshold (USD)'];
+  if (v !== '' && v != null && !isNaN(Number(v))) return Number(v);
+  if (person && person.threshold != null) return person.threshold;
+  return Number(masterSetting_('COMMISSION_THRESHOLD')) || 0;
+}
+
+function managerPin_(settings) {
+  const v = String(settings['Manager PIN'] == null ? '' : settings['Manager PIN']).trim();
+  return v || String(masterSetting_('MANAGER_PIN') || '').trim();
+}
+
+function sha256Hex_(text) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8)
+    .map(function (b) { return ('0' + ((b + 256) % 256).toString(16)).slice(-2); }).join('');
+}
+
+/* Staff access ends 12 hours after the closing time of the last event day
+   (no closing time in Opening Hours: 12 hours after midnight, i.e. noon the next day). */
+function closingHour_(text) {
+  const re = /(\d{1,2})(?:[:.h](\d{2}))?\s*(am|pm)?\s*(?:-|–|—|to)\s*(\d{1,2})(?:[:.h](\d{2}))?\s*(am|pm)?/gi;
+  let m, best = null;
+  while ((m = re.exec(String(text || ''))) !== null) {
+    let sh = Number(m[1]), eh = Number(m[4]);
+    const em = Number(m[5] || 0), sap = (m[3] || '').toLowerCase(), eap = (m[6] || sap).toLowerCase();
+    if (eap === 'pm' && eh < 12) eh += 12;
+    if (eap === 'am' && eh === 12) eh = 0;
+    if (sap === 'pm' && sh < 12) sh += 12;
+    let end = eh + em / 60;
+    if (end <= sh || end < 6) end += 24; // closes after midnight
+    if (end > 48) continue;
+    if (best === null || end > best) best = end;
+  }
+  return best;
+}
+
+function accessEnds_(ev, settings) {
+  const close = closingHour_(settings['Opening Hours']);
+  const midnight = Utilities.parseDate(ev.endDate + ' 00:00', tz_(), 'yyyy-MM-dd HH:mm').getTime();
+  return midnight + ((close === null ? 24 : close) + 12) * 3600000;
 }
 
 function readEventSettings_(sheetId) {
@@ -665,6 +891,7 @@ function readEventSettings_(sheetId) {
 function getEvent_(id) {
   const found = findEventRow_(id);
   const ev = rowToEvent_(found.values);
+  if (isDraft_(ev)) { ev.staff = []; ev.settings = null; ev.defaults = draftDefaults_(); return ev; }
   const ss = SpreadsheetApp.openById(ev.sheetId);
   const s = readEventSettings_(ev.sheetId);
   ev.staff = readStaff_(ss);
@@ -677,14 +904,29 @@ function getEvent_(id) {
     cogsPct: Number(s['COGS %']) || 0,
     pin: String(s['PIN'] || ''),
     dailyTargetQty: s['Daily Target Qty'] === '' ? null : Number(s['Daily Target Qty']),
-    dailyTargetSales: s['Daily Target Sales (USD)'] === '' ? null : Number(s['Daily Target Sales (USD)'])
+    dailyTargetSales: s['Daily Target Sales (USD)'] === '' ? null : Number(s['Daily Target Sales (USD)']),
+    managerPin: managerPin_(s),
+    commissionThreshold: commissionThreshold_(s, null),
+    accessEnds: accessEnds_(ev, s)
   };
+  if (s['Opening Hours'] && !(ev.info && ev.info.openingHours)) { ev.info = ev.info || {}; ev.info.openingHours = String(s['Opening Hours']); }
+  ev.defaults = draftDefaults_();
   return ev;
+}
+
+/* starting values for a new break-even simulation */
+function draftDefaults_() {
+  return {
+    cogsPct: Number(masterSetting_('COGS_PCT')) || 0,
+    staffRate: Number(masterSetting_('DEFAULT_STAFF_RATE')) || 0,
+    threshold: Number(masterSetting_('COMMISSION_THRESHOLD')) || 0
+  };
 }
 
 function setEventStatus_(id, status) {
   if (status !== 'Open' && status !== 'Closed') throw userError_('Status must be Open or Closed.', 'invalid');
   const found = findEventRow_(id);
+  if (isDraft_(rowToEvent_(found.values))) throw userError_('Launch the event first.', 'invalid');
   found.sheet.getRange(found.row, 7).setValue(status);
   found.values[6] = status;
   return rowToEvent_(found.values);
@@ -697,38 +939,49 @@ function eventPublic_(id) {
   return { id: ev.id, name: ev.name, venue: ev.venue, status: ev.status, startDate: ev.startDate, endDate: ev.endDate, type: ev.type };
 }
 
+/* staff can't use a draft, a closed event, or an event whose access window is over */
+function checkStaffWindow_(ev, settings) {
+  if (isDraft_(ev)) throw userError_('This event is not launched yet. Ask your manager.', 'draft');
+  if (ev.status === 'Closed') throw userError_('This event is closed.', 'closed');
+  const ends = accessEnds_(ev, settings || readEventSettings_(ev.sheetId));
+  if (Date.now() > ends) throw userError_('Access to this event ended on ' + Utilities.formatDate(new Date(ends), tz_(), 'EEE d MMM, HH:mm') + '.', 'ended');
+  return ends;
+}
+
 function staffLogin_(req) {
   const id = String(req.eventId || '');
   const ev = rowToEvent_(findEventRow_(id).values);
-  if (ev.status === 'Closed') throw userError_('This event is closed.', 'closed');
+  const settings = isDraft_(ev) ? {} : readEventSettings_(ev.sheetId);
+  const ends = checkStaffWindow_(ev, settings);
   const cache = CacheService.getScriptCache();
   const key = 'pinfail_' + id;
   const fails = Number(cache.get(key) || 0);
   if (fails >= 10) throw userError_('Too many wrong PINs. Wait 10 minutes and try again.', 'locked');
-  const pin = String(readEventSettings_(ev.sheetId)['PIN'] || '').trim();
+  const pin = String(settings['PIN'] || '').trim();
   if (!pin || String(req.pin || '').trim() !== pin) {
     cache.put(key, String(fails + 1), 600);
     Utilities.sleep(600);
     throw userError_('Wrong PIN.', 'bad_pin');
   }
-  const exp = Date.now() + STAFF_TOKEN_HOURS * 3600 * 1000;
+  const exp = Math.min(Date.now() + STAFF_TOKEN_HOURS * 3600 * 1000, ends);
   return { token: signToken_('staff:' + id, exp), expires: exp, event: eventPublic_(id) };
 }
 
 /* Product names, prices and pictures, shown while staff type the PIN (no stock, no sales). */
 function posCatalog_(id) {
   const ev = eventPublic_(id);
-  if (ev.status === 'Closed') throw userError_('This event is closed.', 'closed');
+  checkStaffWindow_(rowToEvent_(findEventRow_(id).values));
   let pics = {};
   try { pics = pictures_(); } catch (e) { pics = {}; }
   const products = getInventory_(id).items.map(function (it) {
-    return { ref: it.ref, name: it.name, category: it.category, price: it.price, picture: it.picture || pics[it.ref] || '' };
+    return { ref: it.ref, name: it.name, category: it.category, price: it.price, picture: it.picture || pics[it.ref] || '', barcodes: barcodesOf_(it.ref) };
   }).sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
   return { event: ev, products: products };
 }
 
 function openEventForWrite_(id) {
   const ev = rowToEvent_(findEventRow_(id).values);
+  if (isDraft_(ev)) throw userError_('This event is not launched yet.', 'draft');
   if (ev.status === 'Closed') throw userError_('This event is closed. Reopen it to record sales.', 'closed');
   return ev;
 }
@@ -856,7 +1109,7 @@ function posData_(id, admin) {
   try { pics = pictures_(); } catch (e) { pics = {}; }
   const products = inv.items.map(function (it) {
     return { ref: it.ref, name: it.name, category: it.category, price: it.price, live: it.live, demo: it.demo,
-      picture: it.picture || pics[it.ref] || '' };
+      picture: it.picture || pics[it.ref] || '', barcodes: barcodesOf_(it.ref) };
   }).sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
   return {
     event: eventPublic_(id),
@@ -870,6 +1123,10 @@ function posData_(id, admin) {
     recentSales: saleSummaries_(ss.getSheetByName('Sales').getDataRange().getValues(), admin ? 200 : 30),
     day: dayState_(ss),
     expectedCash: expectedCash_(ss, s, null),
+    managerPinHash: sha256Hex_(id + ':' + managerPin_(s)),
+    returnApprovalUsd: Number(masterSetting_('RETURN_APPROVAL_USD')) || 0,
+    cashWarn: { usd: Number(masterSetting_('CASH_WARN_USD')) || 0, lbp: Number(masterSetting_('CASH_WARN_LBP')) || 0 },
+    accessEnds: accessEnds_(ev, s),
     warnings: admin ? inv.warnings : [],
     serverTime: new Date().toISOString()
   };
@@ -896,6 +1153,9 @@ function recordSale_(id, sale) {
     const fx = Number(s['Exchange Rate (LBP per USD)']) || 0;
     if (!fx) throw userError_('Set the exchange rate in the event Settings tab first.', 'invalid');
     const maxDisc = Number(s['Max Discount %']) || 0;
+    const approved = !!sale.approval && String(sale.approval) === managerPin_(s);
+    if (sale.approval && !approved) throw userError_('The manager PIN is wrong.', 'invalid');
+    let needsApproval = false;
 
     const seller = String(sale.seller || '').trim();
     if (activeStaffNames_(ss).indexOf(seller) < 0) throw userError_('Pick who made the sale.', 'invalid');
@@ -903,7 +1163,8 @@ function recordSale_(id, sale) {
     const items = {};
     getInventory_(id).items.forEach(function (it) { items[it.ref] = it; });
     const orderDisc = Number(sale.discountPct || 0);
-    if (!(orderDisc >= 0 && orderDisc <= maxDisc)) throw userError_('The discount is above the ' + maxDisc + '% allowed for this event.', 'invalid');
+    if (!(orderDisc >= 0 && orderDisc <= 100)) throw userError_('Check the discount.', 'invalid');
+    if (orderDisc > maxDisc) needsApproval = true;
     // lines: the same product can appear twice (e.g. 1 discounted + 1 at full price); identical lines are merged
     const lines = [];
     (sale.lines || []).forEach(function (l) {
@@ -912,7 +1173,8 @@ function recordSale_(id, sale) {
       if (!items[ref]) throw userError_('A product in this sale is not in the event listing anymore.', 'invalid');
       if (!(q >= 1 && q <= 999)) throw userError_('Check the quantities.', 'invalid');
       const d = orderDisc > 0 ? 0 : Number(l.discountPct || 0); // an order discount replaces item discounts
-      if (!(d >= 0 && d <= maxDisc)) throw userError_('The discount on "' + items[ref].name + '" is above the ' + maxDisc + '% allowed.', 'invalid');
+      if (!(d >= 0 && d <= 100)) throw userError_('Check the discount on "' + items[ref].name + '".', 'invalid');
+      if (d > maxDisc) needsApproval = true;
       const round = d > 0 && l.roundDown !== false;
       const note = d > 0 ? String(l.note || '').slice(0, 120) : '';
       const same = lines.filter(function (x) { return x.ref === ref && x.disc === d && x.round === round && x.note === note; })[0];
@@ -920,6 +1182,7 @@ function recordSale_(id, sale) {
       else lines.push({ ref: ref, qty: q, disc: d, round: round, note: note });
     });
     if (!lines.length) throw userError_('The sale has no products.', 'invalid');
+    if (needsApproval && !approved) throw userError_('A discount above ' + maxDisc + '% needs the manager PIN.', 'invalid');
     lines.forEach(function (l) {
       const gross = items[l.ref].price * l.qty;
       l.total = l.disc > 0 ? (l.round ? Math.floor(round2_(gross * (1 - l.disc / 100))) : round2_(gross * (1 - l.disc / 100))) : round2_(gross);
@@ -967,7 +1230,7 @@ function recordSale_(id, sale) {
     const date = Utilities.formatDate(t, tz_(), 'yyyy-MM-dd');
     const time = Utilities.formatDate(t, tz_(), 'HH:mm');
     const loggedAt = Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm:ss');
-    const note = String(sale.note || '').slice(0, 200);
+    const note = [String(sale.note || '').slice(0, 200), needsApproval ? 'Discount approved with manager PIN' : ''].filter(Boolean).join(' | ');
     const rows = lines.map(function (l, i) {
       const it = items[l.ref];
       const first = i === 0;
@@ -1028,6 +1291,12 @@ function recordReturn_(id, ret) {
     });
     if (!lines.length) throw userError_('Pick the items being returned.', 'invalid');
     const due = round2_(lines.reduce(function (a, l) { return a + l.total; }, 0));
+    const rs = readEventSettings_(ev.sheetId);
+    const limit = Number(masterSetting_('RETURN_APPROVAL_USD')) || 0;
+    const retApproved = limit > 0 && due > limit;
+    if (retApproved && String(ret.approval || '') !== managerPin_(rs)) {
+      throw userError_(ret.approval ? 'The manager PIN is wrong.' : 'Returns above $' + limit + ' need the manager PIN.', 'invalid');
+    }
 
     const method = ret.method === 'Online' ? 'Online' : 'Cash';
     let refundUsd = 0, refundLbp = 0, rounding = 0;
@@ -1046,7 +1315,8 @@ function recordReturn_(id, ret) {
       const o = l.o, first = i === 0;
       return [retId, i + 1, date, time, String(o[4]), String(o[5]), String(o[6]), String(o[7]), -l.qty, Number(o[9]) || 0, Number(o[10]) || 0, -l.total,
         method, first ? (method === 'Online' ? -due : 0) : '', first ? 0 : '', first ? 0 : '', first ? refundUsd : '', first ? refundLbp : '',
-        first ? rounding : '', round2_(-l.total * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt, first ? String(ret.note || '').slice(0, 200) : '', saleId];
+        first ? rounding : '', round2_(-l.total * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt,
+        first ? [String(ret.note || '').slice(0, 200), retApproved ? 'Approved with manager PIN' : ''].filter(Boolean).join(' | ') : '', saleId];
     });
     const start = sh.getLastRow() + 1;
     sh.getRange(start, 1, out.length, 3).setNumberFormat('@');
@@ -1272,11 +1542,14 @@ function dayAction_(id, d) {
         if (Number(r[1]) === 1) online += Number(r[13]) || 0;
       });
       const v = function (a, b) { return a === null || b === null || b === '' ? '' : round2_(Number(b) - a); };
-      sh.getRange(rowIdx, 5, 1, 16).setValues([[stamp, by,
+      const demo = demoTotals_(ss, day);
+      ensureHeaders_(sh, DAYS_HEADERS);
+      sh.getRange(rowIdx, 5, 1, 19).setValues([[stamp, by,
         openRow[6], openRow[7], openRow[8],
         cc ? cc[10] : '', cc ? cc[11] : '', cs ? cs.net : '',
         cc ? v(startUsd, cc[10]) : '', cc ? v(startLbp, cc[11]) : '', cs ? v(startStock, cs.net) : '',
-        cs ? cs.demoMissing : '', round2_(sales), round2_(online), units, 'Closed']]);
+        cs ? cs.demoMissing : '', round2_(sales), round2_(online), units, 'Closed',
+        String(d.notes || '').slice(0, 1000), demo.plays, demo.customers]]);
       try { pnl_(id, true); } catch (e) { console.error(e); } // refresh the P&L and Sales Tracker tabs
       return dayState_(ss);
     }
@@ -1284,6 +1557,301 @@ function dayAction_(id, d) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ------------------------------------------------------------------ customers, refill requests, demo counter */
+
+function clientStamp_(c) { return nowStamp_(when_(c && c.clientTime)); }
+
+/* Optional customer contact, from checkout or from the Customers box. */
+function recordCustomer_(id, c) {
+  c = c || {};
+  const cid = idCheck_(c.id, 'customer');
+  const name = String(c.name || '').trim().slice(0, 80), phone = String(c.phone || '').trim().slice(0, 40), email = String(c.email || '').trim().slice(0, 120);
+  if (!name && !phone && !email) throw userError_('Enter a name, phone or email.', 'invalid');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const sh = lateTab_(ss, 'Customers');
+    if (!alreadyIn_(sh, cid)) {
+      const r = sh.getLastRow() + 1;
+      sh.getRange(r, 1, 1, 9).setNumberFormat('@').setValues([[cid, clientStamp_(c), name, phone, email, String(c.note || '').slice(0, 200),
+        String(c.saleId || '').slice(0, 40), String(c.by || '').slice(0, 80), String(dayState_(ss).tag)]]);
+    }
+    return { id: cid };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* Refill request from the stock count page: one row per product. */
+function recordRefill_(id, r) {
+  r = r || {};
+  const rid = idCheck_(r.id, 'refill request');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const sh = lateTab_(ss, 'Refills');
+    const items = {};
+    getInventory_(id).items.forEach(function (it) { items[it.ref] = it; });
+    const by = String(r.by || '').trim().slice(0, 80);
+    const stamp = clientStamp_(r), day = String(dayState_(ss).tag), note = String(r.note || '').slice(0, 300);
+    const rows = (r.lines || []).filter(function (l) { return items[String(l.ref)] && Math.round(Number(l.qty)) > 0; }).map(function (l) {
+      const it = items[String(l.ref)];
+      return [rid, stamp, by, it.ref, it.name, Math.round(Number(l.qty)), note, day, 'Requested'];
+    });
+    if (!rows.length && !note) throw userError_('Enter the quantities to refill.', 'invalid');
+    if (!rows.length) rows.push([rid, stamp, by, '', '', '', note, day, 'Requested']);
+    if (!alreadyIn_(sh, rid)) {
+      const start = sh.getLastRow() + 1;
+      sh.getRange(start, 1, rows.length, 9).setNumberFormat('@');
+      sh.getRange(start, 1, rows.length, 9).setValues(rows);
+    }
+    return { id: rid, lines: rows.length };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function readRefills_(ss) {
+  const sh = ss.getSheetByName('Refills');
+  if (!sh) return [];
+  const by = {}, order = [];
+  sh.getDataRange().getValues().slice(1).forEach(function (r, i) {
+    const id = String(r[0] || '').trim();
+    if (!id) return;
+    if (!by[id]) { by[id] = { id: id, at: String(r[1]), by: String(r[2]), note: String(r[6] || ''), day: String(r[7] || ''), status: String(r[8] || 'Requested'), lines: [] }; order.push(id); }
+    if (String(r[3] || '').trim()) by[id].lines.push({ ref: String(r[3]), name: String(r[4]), qty: Number(r[5]) || 0, row: i + 2 });
+  });
+  return order.reverse().map(function (k) { return by[k]; });
+}
+
+/* Management: mark a refill request done, optionally adding its quantities to Stock Moves. */
+function setRefill_(id, requestId, status, toStock) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const ss = SpreadsheetApp.openById(ev.sheetId);
+  const sh = lateTab_(ss, 'Refills');
+  const req = readRefills_(ss).filter(function (x) { return x.id === String(requestId); })[0];
+  if (!req) throw userError_('Refill request not found.', 'not_found');
+  const st = status === 'Requested' ? 'Requested' : 'Done';
+  const rows = sh.getDataRange().getValues();
+  for (let i = 1; i < rows.length; i++) if (String(rows[i][0]) === req.id) sh.getRange(i + 1, 9).setValue(st);
+  if (toStock && st === 'Done' && req.status !== 'Done' && req.lines.length) {
+    const moves = ss.getSheetByName('Stock Moves');
+    const today = nowStamp_().slice(0, 10);
+    const start = Math.max(lastFilled_(moves, 1), lastFilled_(moves, 3)) + 1;
+    moves.getRange(start, 1, req.lines.length, 1).setNumberFormat('@');
+    moves.getRange(start, 1, req.lines.length, 1).setValues(req.lines.map(function () { return [today]; }));
+    moves.getRange(start, 3, req.lines.length, 3).setValues(req.lines.map(function (l) { return [l.name, l.qty, 'Refill request ' + req.id]; }));
+  }
+  req.status = st;
+  return req;
+}
+
+/* last row with a value in one column (Stock Moves has a header formula in B that fills the column) */
+function lastFilled_(sh, col) {
+  const v = sh.getRange(1, col, Math.max(1, sh.getLastRow()), 1).getValues();
+  for (let i = v.length - 1; i >= 0; i--) if (String(v[i][0]).trim()) return i + 1;
+  return 1;
+}
+
+/* Demo counter: plays per demo product and customers activated, saved from a phone (at Close day or with Save). */
+function recordDemo_(id, d) {
+  d = d || {};
+  const did = idCheck_(d.id, 'demo entry');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ev = openEventForWrite_(id);
+    const ss = SpreadsheetApp.openById(ev.sheetId);
+    const sh = lateTab_(ss, 'Demos');
+    if (alreadyIn_(sh, did)) return { id: did };
+    const names = {};
+    getInventory_(id).items.forEach(function (it) { names[it.ref] = it.name; });
+    const stamp = clientStamp_(d);
+    const state = dayState_(ss);
+    const day = d.day ? String(d.day) : String(state.tag);
+    const by = String(d.by || '').slice(0, 80);
+    const rows = [];
+    Object.keys(d.plays || {}).forEach(function (ref) {
+      const n = Math.round(Number(d.plays[ref]));
+      if (n > 0 && names[ref]) rows.push([did, stamp, day, ref, names[ref], n, by]);
+    });
+    const cust = Math.round(Number(d.customers) || 0);
+    if (cust > 0) rows.push([did, stamp, day, '', 'Customers activated', cust, by]);
+    if (!rows.length) return { id: did, empty: true };
+    const start = sh.getLastRow() + 1;
+    sh.getRange(start, 1, rows.length, 7).setNumberFormat('@');
+    sh.getRange(start, 1, rows.length, 7).setValues(rows);
+    return { id: did, lines: rows.length };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* plays and customers activated for one business day (or the whole event when day is null) */
+function demoTotals_(ss, day) {
+  const sh = ss.getSheetByName('Demos');
+  const out = { plays: 0, customers: 0, byProduct: {} };
+  if (!sh) return out;
+  sh.getDataRange().getValues().slice(1).forEach(function (r) {
+    if (!String(r[0]).trim()) return;
+    if (day != null && Number(r[2]) !== Number(day)) return;
+    const n = Number(r[5]) || 0;
+    if (!String(r[3]).trim()) { out.customers += n; return; }
+    out.plays += n;
+    const k = String(r[3]);
+    out.byProduct[k] = out.byProduct[k] || { ref: k, name: String(r[4]), plays: 0 };
+    out.byProduct[k].plays += n;
+  });
+  return out;
+}
+
+/* Figures for the WhatsApp summary of a business day (the open day, or the given / last closed one). */
+function daySummary_(id, dayNumber) {
+  const ev = rowToEvent_(findEventRow_(id).values);
+  const ss = SpreadsheetApp.openById(ev.sheetId);
+  const settings = readEventSettings_(ev.sheetId);
+  const days = needTab_(ss, 'Days').getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim(); });
+  let row = dayNumber ? days.filter(function (r) { return Number(r[0]) === Number(dayNumber); })[0] : days[days.length - 1];
+  const from = row ? String(row[2]) : '0000';
+  const to = row && String(row[19]) === 'Closed' ? String(row[4]) : nowStamp_();
+  let sales = 0, online = 0, units = 0, returns = 0;
+  const tickets = {}, prods = {}, sellers = {};
+  ss.getSheetByName('Sales').getDataRange().getValues().slice(1).forEach(function (r) {
+    if (!String(r[0]).trim() || String(r[20] || '').trim()) return;
+    const st = saleStamp_(r);
+    if (st < from || st > to) return;
+    const t = Number(r[11]) || 0, q = Number(r[8]) || 0;
+    sales += t; units += q;
+    if (t < 0) returns += -t;
+    if (Number(r[1]) === 1) online += Number(r[13]) || 0;
+    if (q > 0 && !String(r[24] || '').trim()) tickets[String(r[0])] = true;
+    const k = String(r[5]);
+    prods[k] = prods[k] || { name: String(r[6]), units: 0, sales: 0 };
+    prods[k].units += q; prods[k].sales = round2_(prods[k].sales + t);
+    const se = String(r[4] || '');
+    sellers[se] = sellers[se] || { name: se, units: 0, sales: 0 };
+    sellers[se].units += q; sellers[se].sales = round2_(sellers[se].sales + t);
+  });
+  const dayNo = row ? Number(row[0]) : null;
+  const demo = dayNo ? demoTotals_(ss, dayNo) : { plays: 0, customers: 0, byProduct: {} };
+  const refills = readRefills_(ss).filter(function (x) { return dayNo && Number(x.day) === dayNo; });
+  const custSh = ss.getSheetByName('Customers');
+  const contacts = custSh ? custSh.getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim() && dayNo && Number(r[8]) === dayNo; }).length : 0;
+  const n = Object.keys(tickets).length;
+  return {
+    event: ev.name, venue: ev.venue, day: dayNo, date: row ? String(row[1]) : nowStamp_().slice(0, 10),
+    status: row ? String(row[19]) : 'Not started', openedAt: row ? String(row[2]) : '', closedAt: row ? String(row[4]) : '',
+    sales: round2_(sales), online: round2_(online), cash: round2_(sales - online), units: units, tickets: n, avgTicket: n ? round2_(sales / n) : 0,
+    returns: round2_(returns),
+    targetQty: Number(settings['Daily Target Qty']) || null, targetSales: Number(settings['Daily Target Sales (USD)']) || null,
+    products: Object.keys(prods).map(function (k) { return prods[k]; }).filter(function (p) { return p.units > 0; })
+      .sort(function (a, b) { return b.units - a.units || b.sales - a.sales; }).slice(0, 6),
+    sellers: Object.keys(sellers).map(function (k) { return sellers[k]; }).filter(function (p) { return p.name; }).sort(function (a, b) { return b.sales - a.sales; }),
+    demoPlays: demo.plays, customersActivated: demo.customers, contacts: contacts,
+    demoTop: Object.keys(demo.byProduct).map(function (k) { return demo.byProduct[k]; }).sort(function (a, b) { return b.plays - a.plays; }).slice(0, 5),
+    refills: refills.map(function (x) { return { by: x.by, note: x.note, lines: x.lines.map(function (l) { return { name: l.name, qty: l.qty }; }) }; }),
+    cashDiffUsd: row && row[12] !== '' ? Number(row[12]) : null, cashDiffLbp: row && row[13] !== '' ? Number(row[13]) : null,
+    stockDiff: row && row[14] !== '' ? Number(row[14]) : null, notes: row ? String(row[20] || '') : ''
+  };
+}
+
+/* Events home: one line per running event (today's sales, drawer, people on shift, warnings). */
+function overview_() {
+  const today = nowStamp_().slice(0, 10);
+  const warnUsd = Number(masterSetting_('CASH_WARN_USD')) || 0, warnLbp = Number(masterSetting_('CASH_WARN_LBP')) || 0;
+  return listEvents_().filter(function (ev) {
+    return ev.status === 'Open' && ev.sheetId && ev.startDate <= today && today <= ev.endDate;
+  }).map(function (ev) {
+    try {
+      const ss = SpreadsheetApp.openById(ev.sheetId);
+      const s = readEventSettings_(ev.sheetId);
+      let sales = 0, units = 0;
+      const tickets = {};
+      ss.getSheetByName('Sales').getDataRange().getValues().slice(1).forEach(function (r) {
+        if (!String(r[0]).trim() || String(r[20] || '').trim() || dateStr_(r[2]) !== today) return;
+        sales += Number(r[11]) || 0; units += Number(r[8]) || 0;
+        if ((Number(r[8]) || 0) > 0 && !String(r[24] || '').trim()) tickets[String(r[0])] = true;
+      });
+      const cash = expectedCash_(ss, s, null);
+      const day = dayState_(ss);
+      const refills = readRefills_(ss).filter(function (x) { return x.status !== 'Done'; }).length;
+      return { id: ev.id, name: ev.name, sales: round2_(sales), units: units, tickets: Object.keys(tickets).length,
+        cash: cash, cashWarn: (warnUsd && cash.usd > warnUsd) || (warnLbp && cash.lbp > warnLbp),
+        dayOpen: day.open, dayNumber: day.open ? day.number : day.next - 1, onShift: openShifts_(ss).map(function (x) { return x.name; }),
+        refills: refills, targetSales: Number(s['Daily Target Sales (USD)']) || null, targetQty: Number(s['Daily Target Qty']) || null };
+    } catch (e) {
+      return { id: ev.id, name: ev.name, error: String(e && e.message || e) };
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ catalogue extras: barcodes, names (cached 6 h) */
+
+function cachedJson_(key, seconds, build) {
+  const cache = CacheService.getScriptCache();
+  const head = cache.get(key + '_n');
+  if (head !== null) {
+    const keys = [];
+    for (let i = 0; i < Number(head); i++) keys.push(key + '_' + i);
+    const got = cache.getAll(keys);
+    let json = '', complete = true;
+    keys.forEach(function (k) { if (got[k] == null) complete = false; else json += got[k]; });
+    if (complete) { try { return JSON.parse(json); } catch (e) { /* rebuild */ } }
+  }
+  const value = build();
+  const json = JSON.stringify(value);
+  const chunks = {};
+  let n = 0;
+  for (let i = 0; i < json.length; i += 90000) chunks[key + '_' + (n++)] = json.slice(i, i + 90000);
+  chunks[key + '_n'] = String(n);
+  try { cache.putAll(chunks, seconds); } catch (e) { /* cache is a bonus */ }
+  return value;
+}
+
+/* every barcode of the SHN Catalogue (Barcode (Latest), Barcode 2, 3, 4), by Ref Code */
+function catalogueBarcodes_() {
+  return cachedJson_('barcodes', 21600, function () {
+    const sheet = SpreadsheetApp.openById(String(masterSetting_('CATALOG_SHEET_ID')).trim()).getSheets()[0];
+    const values = sheet.getDataRange().getValues();
+    const head = values[0].map(normKey_);
+    const refIx = head.indexOf(normKey_(CATALOG_COLS.ref));
+    const cols = [];
+    head.forEach(function (h, i) { if (/^barcode/.test(h)) cols.push(i); });
+    const map = {};
+    values.slice(1).forEach(function (r) {
+      const ref = String(r[refIx] || '').trim();
+      if (!ref) return;
+      cols.forEach(function (c) {
+        const raw = r[c];
+        const code = typeof raw === 'number' ? raw.toFixed(0) : String(raw || '').replace(/\s+/g, '').trim();
+        if (!code || code === '0') return;
+        map[ref] = map[ref] || [];
+        if (map[ref].indexOf(code) < 0) map[ref].push(code);
+      });
+    });
+    return map;
+  });
+}
+
+let BARCODES_ = null;
+function barcodesOf_(ref) {
+  if (BARCODES_ === null) { try { BARCODES_ = catalogueBarcodes_(); } catch (e) { BARCODES_ = {}; } }
+  return BARCODES_[ref] || [];
+}
+
+function withBarcodes_(inv) {
+  inv.items.forEach(function (it) { it.barcodes = barcodesOf_(it.ref); });
+  return inv;
+}
+
+function catalogueNames_() {
+  return cachedJson_('catnames', 21600, function () { return loadCatalogue_().map(function (r) { return r[0]; }); });
 }
 
 /* For the management tabs: cash, shifts and pay, counts, days. */
@@ -1321,7 +1889,7 @@ function eventReport_(id) {
     const p = byName[String(r[4])];
     if (!p) return;
     const unitPaid = Math.abs(Number(r[11]) || 0) / Math.abs(q);
-    const rate = unitPaid >= p.threshold ? p.commissionOver : p.commissionUnder;
+    const rate = unitPaid >= commissionThreshold_(settings, p) ? p.commissionOver : p.commissionUnder;
     const k = dateStr_(r[2]) + '|' + p.name;
     comm[k] = round2_((comm[k] || 0) + rate * q);
     unitsBy[k] = (unitsBy[k] || 0) + q;
@@ -1373,8 +1941,15 @@ function eventReport_(id) {
     days: dayRows.map(function (r) {
       return { day: r[0], date: String(r[1]), openedAt: String(r[2]), openedBy: String(r[3]), closedAt: String(r[4]), closedBy: String(r[5]),
         openCashUsd: r[6], openCashLbp: r[7], openStock: r[8], closeCashUsd: r[9], closeCashLbp: r[10], closeStock: r[11],
-        varUsd: r[12], varLbp: r[13], varStock: r[14], demoMissing: r[15], sales: r[16], online: r[17], units: r[18], status: String(r[19]) };
+        varUsd: r[12], varLbp: r[13], varStock: r[14], demoMissing: r[15], sales: r[16], online: r[17], units: r[18], status: String(r[19]),
+        notes: String(r[20] || ''), demoPlays: r[21] === undefined ? '' : r[21], customersActivated: r[22] === undefined ? '' : r[22] };
     }).reverse(),
+    refills: readRefills_(ss),
+    customers: (ss.getSheetByName('Customers') ? ss.getSheetByName('Customers').getDataRange().getValues().slice(1) : [])
+      .filter(function (r) { return String(r[0]).trim(); }).map(function (r) {
+        return { at: String(r[1]), name: String(r[2]), phone: String(r[3]), email: String(r[4]), note: String(r[5]), saleId: String(r[6]), by: String(r[7]) };
+      }).reverse(),
+    demo: demoTotals_(ss, null),
     fxRate: Number(settings['Exchange Rate (LBP per USD)']) || 0
   };
 }
@@ -1508,7 +2083,18 @@ function pnl_(id, writeSheet) {
       targetSales: settings['Daily Target Sales (USD)'] === '' ? null : Number(settings['Daily Target Sales (USD)']) || null
     }
   };
-  if (writeSheet) writeReportTabs_(ss, ev, out, sales, items);
+  const demo = demoTotals_(ss, null);
+  out.dashboard.demoPlays = demo.plays;
+  out.dashboard.customersActivated = demo.customers;
+  out.dashboard.demoProducts = Object.keys(demo.byProduct).map(function (k) { return demo.byProduct[k]; }).sort(function (a, b) { return b.plays - a.plays; });
+  if (writeSheet) {
+    writeReportTabs_(ss, ev, out, sales, items);
+    // per-day averages kept in the master sheet, for break-even forecasts of later events
+    try {
+      const f = findEventRow_(id);
+      f.sheet.getRange(f.row, 14, 1, 3).setValues([[days.length, out.dashboard.avgUnitsPerDay, out.dashboard.avgPerDay]]);
+    } catch (e) { console.error(e); }
+  }
   return out;
 }
 

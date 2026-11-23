@@ -22,6 +22,9 @@
   function dataKey(id) { return 'shn-pos-' + id; }
   function queueKey(id) { return 'shn-queue-' + id; }
   function preKey(id) { return 'shn-pre-' + id; }
+  function holdKey(id) { return 'shn-hold-' + id; }
+  function demoKey(id) { return 'shn-demo-' + id; }
+  function contactsKey(id) { return 'shn-contacts-' + id; }
 
   function getStaffToken(id) {
     var t = load(staffTokenKey(id), null);
@@ -97,8 +100,9 @@
       if (h) h.textContent = res.catalog.event.name;
       warmPictures(res.catalog.products);
     }).catch(function (err) {
-      if (err.code === 'closed' && document.getElementById('pinDots')) {
-        S.app.innerHTML = '<div class="card empty"><h2>This event is closed</h2><p class="muted">Ask your manager.</p></div>';
+      if ((err.code === 'closed' || err.code === 'draft' || err.code === 'ended') && document.getElementById('pinDots')) {
+        S.app.innerHTML = '<div class="card empty"><h2>' + S.esc(err.code === 'closed' ? 'This event is closed' : err.code === 'draft' ? 'This event is not launched yet' : 'Access has ended') + '</h2>' +
+          '<p class="muted">' + S.esc(err.code === 'ended' ? err.message : 'Ask your manager.') + '</p></div>';
       }
     });
     if (!cached) {
@@ -205,7 +209,7 @@
   function req(pos, action, data) {
     return S.api(action, Object.assign({ eventId: pos.eventId }, data || {}), { token: pos.token, quiet: true })
       .catch(function (err) {
-        if (err.code === 'auth' && !pos.admin) {
+        if ((err.code === 'auth' || err.code === 'ended') && !pos.admin) {
           drop(staffTokenKey(pos.eventId));
           unmount();
           pinScreen(pos.eventId);
@@ -240,7 +244,7 @@
         if (err.detail) setTimeout(function () { if (current === pos) refresh(pos); }, 5000);
         return;
       }
-      if (err.code === 'closed') { pos.el.innerHTML = '<div class="card empty"><h2>This event is closed</h2><p class="muted">Ask your manager.</p></div>'; return; }
+      if (err.code === 'closed' || err.code === 'draft') { pos.el.innerHTML = '<div class="card empty"><h2>' + (err.code === 'draft' ? 'This event is not launched yet' : 'This event is closed') + '</h2><p class="muted">Ask your manager.</p></div>'; return; }
       report(pos, err, 'posData');
       if (!pos.data) showLoadError(pos, err); else showError(pos, 'Couldn\'t refresh the products.', err);
     });
@@ -309,8 +313,11 @@
         : next.type === 'count' ? req(pos, 'recordCount', { count: next.count })
           : next.type === 'cash' ? req(pos, 'recordCash', { cash: next.cash })
             : next.type === 'day' ? req(pos, 'dayAction', { day: next.day })
-              : req(pos, 'clock', { name: next.name, direction: next.direction, clientTime: next.clientTime, note: next.note || '' });
-    var answerKey = { sale: 'sale', 'return': 'sale', clock: 'openShifts', count: 'count', cash: 'cash', day: 'day' }[next.type];
+              : next.type === 'customer' ? req(pos, 'recordCustomer', { customer: next.customer })
+                : next.type === 'refill' ? req(pos, 'recordRefill', { refill: next.refill })
+                  : next.type === 'demo' ? req(pos, 'recordDemo', { demo: next.demo })
+                    : req(pos, 'clock', { name: next.name, direction: next.direction, clientTime: next.clientTime, note: next.note || '' });
+    var answerKey = { sale: 'sale', 'return': 'sale', clock: 'openShifts', count: 'count', cash: 'cash', day: 'day', customer: 'customer', refill: 'refill', demo: 'demo' }[next.type];
     return call.then(function (res) {
       if (!res || !res[answerKey]) {
         var e = new Error('The server answered without confirming.');
@@ -341,7 +348,7 @@
       var q3 = queue(pos).map(function (x) { if (x.qid === next.qid) x.error = err.message; return x; });
       setQueue(pos, q3);
       if (current === pos) {
-        showError(pos, 'A ' + (next.type === 'clock' ? 'clock entry' : next.type) + ' could not be saved.', err);
+        showError(pos, 'A ' + ({ clock: 'clock entry', customer: 'customer contact', refill: 'refill request', demo: 'demo count' }[next.type] || next.type) + ' could not be saved.', err);
         if (pos.view === 'products') render(pos);
         flush(pos);
       }
@@ -380,24 +387,28 @@
     if (pos.view === 'clock') return renderClock(pos);
     if (pos.view === 'count') return renderCount(pos);
     if (pos.view === 'cash') return renderCash(pos);
+    if (pos.view === 'demo') return renderDemo(pos);
+    if (pos.view === 'customers') return renderCustomers(pos);
     document.body.classList.remove('pos-checkout');
     var d = pos.data;
     var cats = [];
     d.products.forEach(function (p) { if (p.category && cats.indexOf(p.category) < 0) cats.push(p.category); });
     cats.sort();
+    var held = holds(pos).length;
     root.innerHTML =
       '<div class="pos-bar">' +
-      '<div class="pos-sync" id="posSync"></div>' +
+      '<div class="pos-sync"><button class="icon-btn" id="posRefresh" title="Reload products and stock" aria-label="Refresh">' + ICONS.refresh + '</button><span id="posSync"></span></div>' +
       '<div class="pos-bar-actions">' +
       (pos.admin ? '' : '<button class="btn btn-ghost btn-sm" id="posHome">‹ Home</button>') +
-      '<button class="btn btn-ghost btn-sm" id="posStaff">Clock in / out</button>' +
+      '<button class="btn btn-ghost btn-sm' + (held ? ' has-hold' : '') + '" id="posHold">On hold' + (held ? ' <b>' + held + '</b>' : '') + '</button>' +
       '<button class="btn btn-ghost btn-sm" id="posRecent">Recent sales</button>' +
-      '<button class="btn btn-ghost btn-sm" id="posRefresh" title="Reload products and stock">Refresh</button>' +
+      '<button class="btn btn-ghost btn-sm icon-only" id="posCustomer" title="Add a customer contact" aria-label="Add a customer contact">' + ICONS.person + '</button>' +
       '</div></div>' + errorSlot(pos) +
       '<div class="pos-grid">' +
       '<section class="pos-products">' +
       '<div class="pos-filters">' +
-      '<input class="input" id="posSearch" type="search" placeholder="Search product or ref code" value="' + S.esc(pos.query) + '" autocomplete="off">' +
+      '<div class="search-wrap"><input class="input" id="posSearch" type="search" placeholder="Search, ref code or barcode" value="' + S.esc(pos.query) + '" autocomplete="off" enterkeyhint="search">' +
+      '<button class="scan-btn" id="posScan" type="button" aria-label="Scan a barcode" title="Scan a barcode">' + ICONS.scan + '</button></div>' +
       '<div class="chips pos-chips">' +
       [''].concat(cats).map(function (c) {
         return '<button class="chip' + (pos.cat === c ? ' active' : '') + '" data-cat="' + S.esc(c) + '">' + (c ? S.esc(c) : 'All') + '</button>';
@@ -407,11 +418,27 @@
       '<aside class="pos-cart" id="posCart"></aside>' +
       '</div>' +
       '<button class="pos-cartbar" id="posCartBar"></button>';
-    root.querySelector('#posSearch').oninput = function () { pos.query = this.value; drawTiles(pos); };
+    var search = root.querySelector('#posSearch');
+    search.oninput = function () { pos.query = this.value; drawTiles(pos); };
+    // a barcode typed (or sent by a scanner gun) + Enter adds the product
+    search.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      var hit = byBarcode(pos, search.value);
+      if (hit) { e.preventDefault(); addToCart(pos, hit.ref, 1); S.toast('Added: ' + hit.name); pos.query = ''; search.value = ''; drawTiles(pos); }
+    });
+    root.querySelector('#posScan').onclick = function () {
+      openScanner(pos, { title: 'Scan products', continuous: true }, function (code) {
+        var hit = byBarcode(pos, code);
+        if (!hit) return { ok: false, text: 'No product with barcode ' + code };
+        addToCart(pos, hit.ref, 1);
+        return { ok: true, text: 'Added: ' + hit.name + ' (' + inCart(pos, hit.ref) + ' in sale)' };
+      });
+    };
     Array.prototype.forEach.call(root.querySelectorAll('[data-cat]'), function (b) {
       b.onclick = function () { pos.cat = b.getAttribute('data-cat'); render(pos); };
     });
-    root.querySelector('#posStaff').onclick = function () { openStaff(pos); };
+    root.querySelector('#posHold').onclick = function () { openHolds(pos); };
+    root.querySelector('#posCustomer').onclick = function () { openCustomer(pos); };
     if (root.querySelector('#posHome')) root.querySelector('#posHome').onclick = function () { go(pos, 'home'); };
     root.querySelector('#posRecent').onclick = function () { openRecent(pos); };
     root.querySelector('#posRefresh').onclick = function () { S.toast('Refreshing…'); refresh(pos); flush(pos); };
@@ -475,7 +502,8 @@
     var pend = pendingQty(pos);
     var list = pos.data.products.filter(function (p) {
       if (pos.cat && p.category !== pos.cat) return false;
-      return !q || p.name.toLowerCase().indexOf(q) >= 0 || String(p.ref).toLowerCase().indexOf(q) >= 0;
+      return !q || p.name.toLowerCase().indexOf(q) >= 0 || String(p.ref).toLowerCase().indexOf(q) >= 0 ||
+        (q.length >= 4 && (p.barcodes || []).some(function (b) { return b.indexOf(q) >= 0; }));
     });
     if (!pos.data.products.length) {
       el.innerHTML = '<div class="card empty"><p class="muted">No products in this event yet. Ask your manager to fill the Listing tab.</p></div>';
@@ -596,7 +624,8 @@
       var d = parseNum($('#idPct').value);
       var t = r2(p.price * q * (1 - d / 100));
       if ($('#idRound').checked && d > 0) t = Math.floor(t);
-      $('#idPreview').textContent = d > 0 ? q + '× ' + S.money(p.price) + ' → ' + S.money(t) : '';
+      $('#idPreview').innerHTML = (d > 0 ? S.esc(q + '× ' + S.money(p.price) + ' → ' + S.money(t)) : '') +
+        (d > pos.data.maxDiscountPct ? '<div class="warn-text">Above the ' + S.num(pos.data.maxDiscountPct) + '% max: the manager PIN is asked at Confirm.</div>' : '');
     }
     ['#idQty', '#idPct'].forEach(function (s2) { $(s2).oninput = preview; });
     $('#idRound').onchange = preview;
@@ -612,7 +641,7 @@
       var err = '';
       if (!(q >= 1 && q <= maxQ)) err = 'Quantity must be between 1 and ' + maxQ + '.';
       else if (!(d > 0)) err = 'Enter the discount %.';
-      else if (d > pos.data.maxDiscountPct) err = 'This discount is above what is allowed for this event.';
+      else if (d > 100) err = 'A discount can\'t be more than 100%.';
       if (err) { $('#idErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
       var target = line;
       if (q < line.qty) { line.qty -= q; target = newLine(line.ref, q); pos.cart.splice(pos.cart.indexOf(line) + 1, 0, target); }
@@ -643,7 +672,7 @@
       }).join('') : '<div class="cart-empty">Tap products to add them.</div>') + '</div>' +
       (pos.cart.length
         ? '<div class="cart-totals"><div class="grand"><span>Total</span><span>' + S.money(t.total) + '</span></div></div>' +
-          '<div class="cart-actions"><button class="btn btn-ghost" id="cartClear">Clear</button>' +
+          '<div class="cart-actions"><button class="btn btn-ghost" id="cartClear">Clear</button><button class="btn btn-ghost" id="cartHold">Hold</button>' +
           '<button class="btn btn-accent btn-big" id="cartReview">Checkout</button></div>'
         : '');
     bar.innerHTML = t.units ? '<span>' + t.units + (t.units === 1 ? ' item' : ' items') + '</span><b>' + S.money(t.total) + '</b><span>Checkout ›</span>' : '';
@@ -652,10 +681,192 @@
     if (clr) clr.onclick = function () { if (window.confirm('Clear this sale?')) { resetSale(pos); render(pos); } };
     var rev = el.querySelector('#cartReview');
     if (rev) rev.onclick = function () { openCheckout(pos); };
+    var hb = el.querySelector('#cartHold');
+    if (hb) hb.onclick = function () { holdSale(pos); };
   }
 
   function resetSale(pos) {
-    pos.cart = []; pos.discount = ''; pos.note = ''; pos.seller = ''; pos.pay = null; pos.roundOrder = true;
+    pos.cart = []; pos.discount = ''; pos.note = ''; pos.seller = ''; pos.pay = null; pos.roundOrder = true; pos.customer = null; pos.approval = '';
+  }
+
+  /* ---------------- barcodes */
+  function normCode(c) { return String(c || '').replace(/\s+/g, '').replace(/^0+/, ''); }
+  function byBarcode(pos, code) {
+    var c = normCode(code);
+    if (c.length < 4) return null;
+    return pos.data.products.filter(function (p) {
+      return (p.barcodes || []).some(function (b) { return normCode(b) === c; }) || String(p.ref) === String(code).trim();
+    })[0] || null;
+  }
+
+  /* camera scanner: the phone's own barcode reader where there is one, else the ZXing library (loaded on first use) */
+  var zxingLoading = null;
+  function loadZxing() {
+    if (window.ZXing) return Promise.resolve();
+    if (!zxingLoading) zxingLoading = new Promise(function (res, rej) {
+      var sc = document.createElement('script');
+      sc.src = 'assets/vendor/zxing.min.js';
+      sc.onload = function () { res(); };
+      sc.onerror = function () { zxingLoading = null; rej(new Error('Could not load the barcode reader. Check the internet.')); };
+      document.head.appendChild(sc);
+    });
+    return zxingLoading;
+  }
+
+  function openScanner(pos, opts, onCode) {
+    var wrap = document.createElement('div');
+    wrap.className = 'scan-full';
+    wrap.innerHTML = '<div class="scan-top"><b>' + S.esc(opts.title || 'Scan a barcode') + '</b><button class="btn btn-ghost btn-sm" id="scanDone">Done</button></div>' +
+      '<div class="scan-view"><video id="scanVideo" playsinline muted></video><div class="scan-frame"></div></div>' +
+      '<div class="scan-msg" id="scanMsg">Point the camera at the barcode.</div>' +
+      '<div class="scan-manual"><input class="input" id="scanType" inputmode="numeric" placeholder="Or type the barcode"><button class="btn btn-primary" id="scanTypeGo">OK</button></div>';
+    document.body.appendChild(wrap);
+    var video = wrap.querySelector('#scanVideo'), msg = wrap.querySelector('#scanMsg');
+    var stream = null, stopped = false, last = '', lastAt = 0, zx = null, raf = null;
+    function stop() {
+      stopped = true;
+      if (raf) clearTimeout(raf);
+      if (zx) { try { zx.reset(); } catch (e) { /* ignore */ } }
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      wrap.remove();
+    }
+    function got(code) {
+      var now = Date.now();
+      if (code === last && now - lastAt < 2000) return;
+      last = code; lastAt = now;
+      var r = onCode(code) || { ok: true };
+      msg.textContent = r.text || code;
+      msg.className = 'scan-msg ' + (r.ok ? 'good' : 'bad');
+      if (navigator.vibrate) navigator.vibrate(r.ok ? 60 : [40, 60, 40]);
+      if (r.ok && !opts.continuous) stop();
+    }
+    wrap.querySelector('#scanDone').onclick = stop;
+    var typed = wrap.querySelector('#scanType');
+    wrap.querySelector('#scanTypeGo').onclick = function () { if (typed.value.trim()) { last = ''; got(typed.value.trim()); typed.value = ''; } };
+    typed.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); wrap.querySelector('#scanTypeGo').click(); } });
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { msg.textContent = 'This browser cannot use the camera here. Type the barcode instead.'; return; }
+    var formats = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'];
+    if ('BarcodeDetector' in window) {
+      Promise.resolve(window.BarcodeDetector.getSupportedFormats ? window.BarcodeDetector.getSupportedFormats() : formats).then(function (sup) {
+        var det = new window.BarcodeDetector({ formats: formats.filter(function (f) { return sup.indexOf(f) >= 0; }) });
+        return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false }).then(function (st) {
+          if (stopped) { st.getTracks().forEach(function (t) { t.stop(); }); return; }
+          stream = st; video.srcObject = st; return video.play().then(function () {
+            (function tick() {
+              if (stopped) return;
+              det.detect(video).then(function (codes) { if (codes && codes[0]) got(codes[0].rawValue); }).catch(function () {})
+                .then(function () { raf = setTimeout(tick, 180); });
+            })();
+          });
+        });
+      }).catch(function (err) { msg.textContent = cameraError(err); msg.className = 'scan-msg bad'; });
+      return;
+    }
+    loadZxing().then(function () {
+      if (stopped) return;
+      var hints = new Map();
+      hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [window.ZXing.BarcodeFormat.EAN_13, window.ZXing.BarcodeFormat.EAN_8, window.ZXing.BarcodeFormat.UPC_A,
+        window.ZXing.BarcodeFormat.UPC_E, window.ZXing.BarcodeFormat.CODE_128, window.ZXing.BarcodeFormat.CODE_39, window.ZXing.BarcodeFormat.ITF]);
+      zx = new window.ZXing.BrowserMultiFormatReader(hints, 200);
+      return zx.decodeFromConstraints({ video: { facingMode: 'environment' }, audio: false }, video, function (result) {
+        if (result && !stopped) got(result.getText());
+      });
+    }).catch(function (err) { msg.textContent = cameraError(err); msg.className = 'scan-msg bad'; });
+  }
+  function cameraError(err) {
+    var n = err && err.name;
+    if (n === 'NotAllowedError') return 'Camera blocked. Allow the camera for this site in the browser settings, or type the barcode.';
+    if (n === 'NotFoundError') return 'No camera found. Type the barcode instead.';
+    return (err && err.message) || 'The camera could not start. Type the barcode instead.';
+  }
+
+  /* ---------------- sales on hold (kept on this phone) */
+  function holds(pos) { return load(holdKey(pos.eventId), []); }
+  function holdSale(pos, silent) {
+    if (!pos.cart.length) return;
+    var t = totals(pos);
+    var h = holds(pos);
+    h.push({ id: 'H' + Date.now().toString(36), at: new Date().toISOString(), cart: pos.cart, discount: pos.discount, roundOrder: pos.roundOrder, note: pos.note,
+      customer: pos.customer || null, total: t.total, units: t.units });
+    save(holdKey(pos.eventId), h);
+    resetSale(pos);
+    pos.view = 'products';
+    render(pos);
+    if (!silent) S.toast('Sale put on hold: ' + S.money(t.total) + '. Find it under On hold.');
+  }
+  function openHolds(pos) {
+    var list = holds(pos);
+    var m = modal('<div class="pay-head"><h2>On hold</h2><button class="link-btn" data-close>Close</button></div>' +
+      (list.length ? list.slice().reverse().map(function (h) {
+        var names = h.cart.map(function (l) { var p = product(pos, l.ref); return l.qty + '× ' + (p ? p.name : l.ref); });
+        return '<div class="sale-row"><div class="sr-main"><b>' + S.money(h.total) + '</b> · ' + h.units + ' item' + (h.units === 1 ? '' : 's') +
+          ' · held at ' + new Date(h.at).toTimeString().slice(0, 5) + (h.customer && h.customer.name ? ' · ' + S.esc(h.customer.name) : '') +
+          '<div class="sr-items">' + names.map(function (n) { return '<div>' + S.esc(n) + '</div>'; }).join('') + '</div></div>' +
+          '<div class="hold-actions"><button class="btn btn-primary btn-sm" data-resume="' + h.id + '">Resume</button><button class="link-btn neg" data-hdel="' + h.id + '">Delete</button></div></div>';
+      }).join('') : '<p class="muted">No sales on hold. Use <b>Hold</b> at checkout to keep a sale aside while you serve someone else.</p>'));
+    Array.prototype.forEach.call(m.el.querySelectorAll('[data-resume]'), function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-resume');
+        var h = holds(pos).filter(function (x) { return x.id === id; })[0];
+        if (!h) return;
+        if (pos.cart.length) {
+          if (!window.confirm('Put the current sale on hold and resume this one?')) return;
+          holdSale(pos, true);
+        }
+        save(holdKey(pos.eventId), holds(pos).filter(function (x) { return x.id !== id; }));
+        pos.cart = h.cart.filter(function (l) { return product(pos, l.ref); });
+        pos.cart.forEach(function (l) { l.key = 'L' + (++lineSeq); });
+        pos.discount = h.discount || ''; pos.roundOrder = h.roundOrder !== false; pos.note = h.note || ''; pos.customer = h.customer || null;
+        m.close();
+        openCheckout(pos);
+      };
+    });
+    Array.prototype.forEach.call(m.el.querySelectorAll('[data-hdel]'), function (b) {
+      b.onclick = function () {
+        if (!window.confirm('Delete this sale on hold?')) return;
+        save(holdKey(pos.eventId), holds(pos).filter(function (x) { return x.id !== b.getAttribute('data-hdel'); }));
+        m.close(); render(pos);
+      };
+    });
+  }
+
+  /* ---------------- customer contacts */
+  function contactFields(c) {
+    c = c || {};
+    return '<div class="field"><label for="cuName">Name</label><input class="input" id="cuName" autocomplete="off" value="' + S.esc(c.name || '') + '"></div>' +
+      '<div class="two"><div class="field"><label for="cuPhone">Phone</label><input class="input" id="cuPhone" type="tel" inputmode="tel" autocomplete="off" value="' + S.esc(c.phone || '') + '"></div>' +
+      '<div class="field"><label for="cuEmail">Email</label><input class="input" id="cuEmail" type="email" inputmode="email" autocomplete="off" value="' + S.esc(c.email || '') + '"></div></div>';
+  }
+  function readContact(root) {
+    var v = function (sel) { var x = root.querySelector(sel); return x ? x.value.trim() : ''; };
+    var c = { name: v('#cuName'), phone: v('#cuPhone'), email: v('#cuEmail') };
+    if (v('#cuNote')) c.note = v('#cuNote');
+    return c.name || c.phone || c.email ? c : null;
+  }
+  function enqueueContact(pos, c, saleId, by) {
+    var item = Object.assign({ id: 'U' + newSaleId().slice(1), saleId: saleId || '', by: by || '', clientTime: new Date().toISOString() }, c);
+    enqueue(pos, { qid: item.id, type: 'customer', customer: item });
+    var list = load(contactsKey(pos.eventId), []);
+    list.unshift({ name: c.name, phone: c.phone, email: c.email, at: item.clientTime, sale: !!saleId });
+    save(contactsKey(pos.eventId), list.slice(0, 100));
+  }
+  function openCustomer(pos, after) {
+    var open = openShiftNames(pos);
+    var by = pos.data.staff.filter(function (n) { return open[n]; }).join(', ');
+    var m = modal('<div class="pay-head"><h2>Customer contact</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<p class="small muted" style="margin-top:0">All optional. Fill what the customer agrees to give.</p>' + contactFields() +
+      '<div class="field"><label for="cuNote">Note</label><input class="input" id="cuNote" placeholder="e.g. Interested in strategy games, wants the newsletter"></div>' +
+      '<div id="cuErr"></div><button class="btn btn-accent btn-big btn-block" id="cuSave">Save contact</button>');
+    m.el.querySelector('#cuSave').onclick = function () {
+      var c = readContact(m.el);
+      if (!c) { m.el.querySelector('#cuErr').innerHTML = '<div class="form-error">Enter a name, phone or email.</div>'; return; }
+      enqueueContact(pos, c, '', by);
+      m.close();
+      S.toast('Contact saved' + (c.name ? ': ' + c.name : '') + '.');
+      flush(pos);
+      if (after) after();
+    };
+    setTimeout(function () { var n = m.el.querySelector('#cuName'); if (n) n.focus(); }, 60);
   }
 
   /* ---------------- checkout: one full page, every field visible from the start */
@@ -751,14 +962,11 @@
           '<div class="cl-total">' + (lt !== gross ? '<s>' + S.money(gross) + '</s>' : '') + S.money(lt) + '</div>' +
           '<button class="pct' + (l.disc && !orderOn ? ' on' : '') + '" data-pct="' + l.key + '" aria-label="Item discount">%</button></div>';
       }).join('') +
-      '<div class="disc-note">' +
-      '<div class="field"><label for="coDisc">Order disc. %</label><input class="input" id="coDisc" inputmode="decimal" placeholder="0" value="' + S.esc(pos.discount) + '"></div>' +
-      '<div class="field"><label for="coNote">Note</label><input class="input" id="coNote" placeholder="Promo code, voucher…" value="' + S.esc(pos.note) + '"></div>' +
-      '</div>' +
-      '<label class="check"><input type="checkbox" id="coRound"' + (pos.roundOrder !== false ? ' checked' : '') + '> Round down to whole $</label>' +
-      '<div class="small warn-text" id="coReplace"></div><div class="small neg" id="coDiscErr"></div></section>' +
+      '<div class="field co-note"><label for="coNote">Note</label><input class="input" id="coNote" placeholder="Promo code, voucher…" value="' + S.esc(pos.note) + '"></div>' +
+      '</section>' +
 
-      '<section class="co-card co-total"><div class="co-sub" id="coSub"></div><div class="big" id="coTotal"></div><div class="muted" id="coTotalLbp"></div></section>' +
+      '<section class="co-card co-total"><button class="pct-total" id="coOrderDisc" aria-label="Discount on the whole sale" title="Discount on the whole sale">%</button>' +
+      '<div class="co-total-main"><div class="co-sub" id="coSub"></div><div class="big" id="coTotal"></div><div class="muted" id="coTotalLbp"></div><div class="small warn-text" id="coDiscErr"></div></div></section>' +
 
       '<section class="co-card"><h3>Payment</h3>' +
       '<div class="seg" id="paySeg">' + ['Cash', 'Online', 'Split'].map(function (x) {
@@ -785,8 +993,11 @@
       (sellers.length ? '' : '<div class="small muted" style="margin-top:6px">Nobody is clocked in yet.</div>') +
       '</section>' +
 
+      '<section class="co-card co-cust"><details id="coCust"' + (pos.customer ? ' open' : '') + '><summary>Customer contact <span class="opt">optional</span></summary>' +
+      '<div class="cust-fields">' + contactFields(pos.customer) + '</div></details></section>' +
+
       '<div id="payError"></div>' +
-      '<button class="btn btn-accent btn-big btn-block" id="payConfirm">Confirm sale</button>' +
+      '<div class="co-btns"><button class="btn btn-accent btn-big" id="payConfirm">Confirm sale</button><button class="btn btn-ghost btn-big" id="coHold">Hold</button></div>' +
       '</div>';
 
     var $ = function (sel) { return root.querySelector(sel); };
@@ -806,18 +1017,12 @@
     $('#coClockIn').onclick = function () {
       openStaff(pos, function (name, dir) { if (dir === 'in') pos.seller = name; renderCheckout(pos); });
     };
-    $('#coDisc').oninput = function () { pos.discount = this.value.replace(/[^0-9.]/g, ''); update(pos); };
-    $('#coDisc').onchange = function () {
-      // an order discount replaces the item discounts
-      if (parseNum(pos.discount) > 0 && pos.cart.some(function (l) { return l.disc > 0; })) {
-        pos.cart.forEach(function (l) { l.disc = 0; l.note = ''; l.round = true; });
-        var refs = {}; pos.cart.forEach(function (l) { refs[l.ref] = 1; });
-        Object.keys(refs).forEach(function (r) { mergeFullPrice(pos, r); });
-        renderCheckout(pos);
-      }
-    };
-    $('#coRound').onchange = function () { pos.roundOrder = this.checked; update(pos); };
+    $('#coOrderDisc').onclick = function () { openOrderDiscount(pos); };
     $('#coNote').oninput = function () { pos.note = this.value; };
+    Array.prototype.forEach.call(root.querySelectorAll('.cust-fields input'), function (x) {
+      x.addEventListener('input', function () { pos.customer = readContact(root.querySelector('.cust-fields')); });
+    });
+    $('#coHold').onclick = function () { holdSale(pos); window.scrollTo(0, 0); };
     Array.prototype.forEach.call(root.querySelectorAll('[data-m]'), function (b) {
       b.onclick = function () {
         pay.method = b.getAttribute('data-m');
@@ -843,6 +1048,76 @@
     if ($('#whishBtn')) $('#whishBtn').onclick = function () { showWhish(pos, calc(pos).online); };
     wireErrorSlot(pos, root);
     update(pos);
+  }
+
+  /* the % next to the total: one discount on the whole sale (replaces item discounts) */
+  function openOrderDiscount(pos) {
+    var had = parseNum(pos.discount) > 0;
+    var items = pos.cart.some(function (l) { return l.disc > 0; });
+    var m = modal(
+      '<div class="pay-head"><h2>Discount on the whole sale</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<div class="field"><label for="odPct">Discount %</label><input class="input money-in" id="odPct" inputmode="decimal" placeholder="0" value="' + S.esc(pos.discount) + '"></div>' +
+      '<label class="check"><input type="checkbox" id="odRound"' + (pos.roundOrder !== false ? ' checked' : '') + '> Round the total down to whole $</label>' +
+      (items ? '<div class="small warn-text">This replaces the item discounts already on this sale.</div>' : '') +
+      '<div class="small muted" id="odPreview"></div><div id="odErr"></div>' +
+      '<div class="dialog-actions">' + (had ? '<button class="btn btn-ghost" id="odRemove">Remove discount</button>' : '') + '<button class="btn btn-primary" id="odOk">OK</button></div>');
+    var $ = function (sel) { return m.el.querySelector(sel); };
+    function preview() {
+      var keep = { d: pos.discount, r: pos.roundOrder };
+      pos.discount = $('#odPct').value.replace(/[^0-9.]/g, ''); pos.roundOrder = $('#odRound').checked;
+      var t = totals(pos);
+      $('#odPreview').innerHTML = t.disc > 0 ? 'New total: <b>' + S.money(t.total) + '</b>' + (t.disc > pos.data.maxDiscountPct ? '<div class="warn-text">Above the ' + S.num(pos.data.maxDiscountPct) + '% max: the manager PIN is asked at Confirm.</div>' : '') : '';
+      pos.discount = keep.d; pos.roundOrder = keep.r;
+    }
+    $('#odPct').oninput = preview; $('#odRound').onchange = preview; preview();
+    if ($('#odRemove')) $('#odRemove').onclick = function () { pos.discount = ''; m.close(); renderCheckout(pos); };
+    $('#odOk').onclick = function () {
+      var d = parseNum($('#odPct').value);
+      if (d > 100) { $('#odErr').innerHTML = '<div class="form-error">A discount can\'t be more than 100%.</div>'; return; }
+      pos.discount = d > 0 ? String(d) : '';
+      pos.roundOrder = $('#odRound').checked;
+      if (d > 0 && items) {
+        pos.cart.forEach(function (l) { l.disc = 0; l.note = ''; l.round = true; });
+        var refs = {}; pos.cart.forEach(function (l) { refs[l.ref] = 1; });
+        Object.keys(refs).forEach(function (r) { mergeFullPrice(pos, r); });
+      }
+      m.close(); renderCheckout(pos);
+    };
+    setTimeout(function () { $('#odPct').focus(); }, 60);
+  }
+
+  /* manager PIN: checked on the phone (works offline), checked again by the server */
+  function sha256(text) {
+    if (!window.crypto || !crypto.subtle || !window.TextEncoder) return Promise.resolve(null);
+    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)).then(function (buf) {
+      return Array.prototype.map.call(new Uint8Array(buf), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    }).catch(function () { return null; });
+  }
+  function askManagerPin(pos, reason, onOk) {
+    var pin = '';
+    var m = modal('<div class="pay-head"><h2>Manager PIN</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<p class="muted" style="margin-top:0">' + S.esc(reason) + '</p><div id="mpErr"></div>' +
+      '<div class="pin-dots" id="mpDots"><span></span><span></span><span></span><span></span></div>' +
+      '<div class="keypad">' + [1, 2, 3, 4, 5, 6, 7, 8, 9, '', 0, '⌫'].map(function (k) {
+        return k === '' ? '<span></span>' : '<button type="button" class="key" data-k="' + k + '">' + k + '</button>';
+      }).join('') + '</div>');
+    function draw() { Array.prototype.forEach.call(m.el.querySelectorAll('#mpDots span'), function (d, i) { d.className = i < pin.length ? 'on' : ''; }); }
+    function press(k) {
+      if (k === '⌫') pin = pin.slice(0, -1); else if (pin.length < 4) pin += k;
+      draw();
+      if (pin.length === 4) {
+        var tried = pin;
+        sha256(pos.eventId + ':' + tried).then(function (h) {
+          if (h && pos.data.managerPinHash && h !== pos.data.managerPinHash) {
+            pin = ''; draw();
+            m.el.querySelector('#mpErr').innerHTML = '<div class="form-error">Wrong manager PIN.</div>';
+            return;
+          }
+          m.close(); onOk(tried);
+        });
+      }
+    }
+    Array.prototype.forEach.call(m.el.querySelectorAll('.key'), function (b) { b.onclick = function () { press(b.getAttribute('data-k')); }; });
   }
 
   /* full-screen Whish QR for the customer to scan */
@@ -888,9 +1163,9 @@
     $('#coSub').innerHTML = t.off ? 'Subtotal ' + S.money(t.sub) + ' · Discount −' + S.money(t.off) : '&nbsp;';
     $('#coTotal').textContent = S.money(t.total);
     $('#coTotalLbp').textContent = lbp(roundLbp(t.total * c.fx, c.step)) + ' at ' + S.num(c.fx);
-    $('#coDiscErr').textContent = t.disc > d.maxDiscountPct ? 'This discount is above what is allowed for this event.' : '';
-    $('#coReplace').textContent = t.itemDisc && !t.disc ? 'An order discount replaces the item discounts on this sale.' : '';
-    $('#coRound').parentNode.classList.toggle('off', !(t.disc > 0));
+    $('#coDiscErr').textContent = t.maxDisc > d.maxDiscountPct ? 'Discount above the ' + S.num(d.maxDiscountPct) + '% max: the manager PIN is asked at Confirm.' : '';
+    $('#coOrderDisc').classList.toggle('on', t.disc > 0);
+    $('#coOrderDisc').textContent = t.disc > 0 ? '−' + S.num(t.disc) + '%' : '%';
     var cash = pay.method !== 'Online';
     $('#onlineField').hidden = pay.method !== 'Split';
     if ($('#whishBtn')) $('#whishBtn').hidden = pay.method === 'Cash';
@@ -914,8 +1189,8 @@
   function confirmSale(pos) {
     var pay = pos.pay, c = calc(pos), t = c.t;
     var err = '';
-    if (t.maxDisc > pos.data.maxDiscountPct) err = 'The discount is above what is allowed for this event.';
-    else if (pay.method === 'Split' && !(c.online > 0 && c.online < t.total)) err = 'Enter the part paid online (less than the total).';
+    var needsPin = t.maxDisc > pos.data.maxDiscountPct;
+    if (pay.method === 'Split' && !(c.online > 0 && c.online < t.total)) err = 'Enter the part paid online (less than the total).';
     var sale = {
       id: newSaleId(), seller: pos.seller, method: pay.method, discountPct: t.disc, roundTotal: pos.roundOrder !== false, note: pos.note.trim(),
       lines: pos.cart.map(function (l) {
@@ -923,6 +1198,7 @@
       }),
       onlineUsd: c.online, recvUsd: 0, recvLbp: 0, changeUsd: 0, changeLbp: 0, clientTime: new Date().toISOString(), total: t.total
     };
+    if (needsPin && pos.approval) sale.approval = pos.approval;
     if (!err && c.hasCash) {
       sale.recvUsd = parseNum(pay.recvUsd);
       sale.recvLbp = Math.round(parseNum(pay.recvLbp));
@@ -937,7 +1213,13 @@
     if (!err && !pos.seller) err = 'Pick who made the sale (Sold by).';
     var box = pos.el.querySelector('#payError');
     if (err) { box.innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; box.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
+    if (needsPin && !pos.approval) {
+      askManagerPin(pos, 'This sale has a ' + S.num(t.maxDisc) + '% discount, above the ' + S.num(pos.data.maxDiscountPct) + '% max.', function (p2) { pos.approval = p2; confirmSale(pos); });
+      return;
+    }
+    var customer = pos.customer;
     enqueue(pos, { qid: sale.id, type: 'sale', sale: sale });
+    if (customer) enqueueContact(pos, customer, sale.id, sale.seller);
     resetSale(pos);
     pos.view = 'products';
     render(pos);
@@ -1052,6 +1334,15 @@
         if (Math.abs(diff) > step / fx + 0.005) err = diff > 0 ? 'Enter what was given back (USD and/or LBP): ' + S.money(due) + ' is due.' : 'More given back than due. Check the amounts.';
       }
       if (err) { $('#rtError').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
+      var limit = pos.data.returnApprovalUsd || 0;
+      if (limit > 0 && due > limit) {
+        if (!r.approval) {
+          var btn = this;
+          askManagerPin(pos, 'Returns above ' + S.money(limit) + ' need the manager PIN.', function (p2) { r.approval = p2; btn.click(); });
+          return;
+        }
+        ret.approval = r.approval;
+      }
       enqueue(pos, { qid: ret.id, type: 'return', ret: ret });
       pos.view = 'products'; pos.ret = null;
       render(pos);
@@ -1159,7 +1450,12 @@
     pos: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6h15l-1.5 9h-12z"/><path d="M6 6 5 3H2"/><circle cx="9" cy="20" r="1.4"/><circle cx="18" cy="20" r="1.4"/></svg>',
     clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
     count: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="m8 9 1.5 1.5L12 8M8 15l1.5 1.5L12 14M14 9h3M14 15h3"/></svg>',
-    cash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 10v4M18 10v4"/></svg>'
+    cash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 10v4M18 10v4"/></svg>',
+    demo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.3"/><circle cx="15.5" cy="15.5" r="1.3"/><circle cx="15.5" cy="8.5" r="1.3"/><circle cx="8.5" cy="15.5" r="1.3"/></svg>',
+    customers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c.6-3.4 3-5.4 6-5.4s5.4 2 6 5.4"/><path d="M16 4.6a3.2 3.2 0 0 1 0 6.3M18.5 14.9c1.4.8 2.3 2.5 2.5 5.1"/></svg>',
+    person: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="8" r="3.4"/><path d="M3.5 20c.7-3.6 3.2-5.6 6.5-5.6 1.6 0 3 .5 4.1 1.4"/><path d="M19 14v6M16 17h6"/></svg>',
+    refresh: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>',
+    scan: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8v8M10 8v8M13 8v8M16.5 8v8"/></svg>'
   };
 
   function renderHome(pos) {
@@ -1168,17 +1464,23 @@
     var d = dayNow(pos);
     var when = function (v) { return v ? (String(v).indexOf('T') > 0 ? new Date(v).toTimeString().slice(0, 5) : String(v).slice(11, 16)) : ''; };
     var mark = function (ok) { return ok ? '<span class="ok">✓</span>' : '<span class="no">–</span>'; };
+    var cash = expectedNow(pos), warn = pos.data.cashWarn || {};
+    var tooMuch = (warn.usd && cash.usd > warn.usd) || (warn.lbp && cash.lbp > warn.lbp);
+    var demoN = demoState(pos);
     root.innerHTML =
       '<div class="home">' +
       '<div class="day-strip' + (d.open ? ' open' : '') + '">' +
       '<div class="ds-main"><b>' + (d.open ? 'Day ' + d.number + ' open since ' + when(d.openedAt) : 'Day not started') + '</b>' +
       '<div class="small">' + (d.open ? 'Closing counts' : 'Opening counts') + ': cash ' + mark(d.counts.cash) + ' · stock ' + mark(d.counts.stock) + '</div></div>' +
       '<button class="btn ' + (d.open ? 'btn-ghost' : 'btn-primary') + ' btn-sm" id="dayBtn">' + (d.open ? 'Close day' : 'Start day') + '</button></div>' +
+      (tooMuch ? '<div class="cash-warn"><b>Too much cash in the drawer.</b> Ask your manager to collect it, then submit a handover in Cash count.</div>' : '') +
       errorSlot(pos) +
       '<div class="home-grid">' +
       [['pos', 'POS', 'Sell, checkout, returns'], ['clock', 'Clock in / out', 'Start and end your shift'],
-        ['count', 'Stock count', 'Count products and demos'], ['cash', 'Cash count', 'Count the drawer, handovers']].map(function (b) {
-        return '<button class="home-box" data-go="' + b[0] + '">' + ICONS[b[0]] + '<b>' + b[1] + '</b><span>' + b[2] + '</span></button>';
+        ['count', 'Stock count', 'Count, request a refill'], ['cash', 'Cash count', 'Count the drawer, handovers'],
+        ['demo', 'Demo counter', demoN.total || demoN.customers ? demoN.total + ' plays · ' + demoN.customers + ' activated' : 'Games played at the stand'],
+        ['customers', 'Customers', 'Save a customer contact']].map(function (b) {
+        return '<button class="home-box" data-go="' + b[0] + '">' + ICONS[b[0]] + '<b>' + b[1] + '</b><span>' + S.esc(b[2]) + '</span></button>';
       }).join('') + '</div>' +
       '<div class="home-foot"><span id="posSync"></span></div></div>';
     Array.prototype.forEach.call(root.querySelectorAll('[data-go]'), function (b) {
@@ -1221,17 +1523,32 @@
         ? '<div class="pay-status owed"><span>No ' + (d.open ? 'closing' : 'opening') + ' ' + missing.join(' or ') + ' count yet. You can still ' + (d.open ? 'close' : 'start') + ' the day, but the report will have gaps.</span></div>'
         : '<div class="pay-status good"><span>Cash and stock counted. Ready.</span></div>') +
       '<h3 class="rs-title">Who is ' + (d.open ? 'closing' : 'starting') + ' the day?</h3><div id="dayWho">' + namePicker(pos, '', 'dayNames') + '</div>' +
+      (d.open ? '<div class="field" style="margin-top:12px"><label for="dayNotes">Notes for the day (optional)</label><textarea class="input" id="dayNotes" rows="3" placeholder="Weather, crowd, what sold, problems, what to bring tomorrow…"></textarea></div>' : '') +
       '<div id="dayErr"></div>' +
       '<button class="btn btn-accent btn-big btn-block" id="dayGo">' + (d.open ? 'Close day' : 'Start day') + '</button>');
     function wire() { wirePicker(pos, m.el, function (n) { who = n; }, function () { m.el.querySelector('#dayWho').innerHTML = namePicker(pos, who, 'dayNames'); wire(); }); }
     wire();
     m.el.querySelector('#dayGo').onclick = function () {
       if (!who) { m.el.querySelector('#dayErr').innerHTML = '<div class="form-error">Pick your name.</div>'; return; }
-      enqueue(pos, { qid: 'D' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'day', day: { action: action, by: who, clientTime: new Date().toISOString() } });
+      var dayNo = d.open ? d.number : d.next;
+      var notesEl = m.el.querySelector('#dayNotes');
+      if (action === 'close') saveDemo(pos, who, true); // the demo counter is saved with the day, then reset
+      enqueue(pos, { qid: 'D' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'day',
+        day: { action: action, by: who, notes: notesEl ? notesEl.value.trim() : '', clientTime: new Date().toISOString() } });
       m.close();
-      S.toast(action === 'open' ? 'Day started.' : 'Day closed. The report is in the event sheet (Days tab).');
       render(pos);
       flush(pos);
+      if (action === 'open') { S.toast('Day started.'); return; }
+      var m2 = modal('<div class="pay-head"><h2>Day ' + dayNo + ' closed</h2><button class="link-btn" data-close>Done</button></div>' +
+        '<p class="muted" style="margin-top:0">The report is in the event sheet (Days tab). Share the day\'s summary with the team:</p>' +
+        '<button class="btn btn-accent btn-big btn-block" id="shareDay">Share summary on WhatsApp</button>');
+      m2.el.querySelector('#shareDay').onclick = function () {
+        var b = this; b.disabled = true; b.textContent = 'Preparing…';
+        // wait until the close is sent, so the summary has the final figures
+        waitQueue(pos, 15000).then(function () {
+          return shareSummary({ eventId: pos.eventId, token: pos.token, day: dayNo });
+        }).then(function () { m2.close(); }, function () { b.disabled = false; b.textContent = 'Share summary on WhatsApp'; });
+      };
     };
   }
 
@@ -1268,7 +1585,8 @@
     var pend = pendingQty(pos);
     var prods = pos.data.products;
     root.innerHTML = '<div class="co count-page">' + pageTop(pos, 'Stock count') +
-      '<section class="co-card">' + purposeHtml(pos, st.purpose) + '</section>' +
+      '<section class="co-card">' + purposeHtml(pos, st.purpose) +
+      '<div class="count-tools"><button class="btn btn-ghost" id="countScan">' + ICONS.scan + ' Scan</button><button class="btn btn-ghost" id="refillBtn">Request a refill</button></div></section>' +
       '<section class="co-card"><table class="count-tbl"><thead><tr><th>Product</th><th>Sellable</th><th>Demo</th><th></th></tr></thead><tbody>' +
       prods.map(function (p, i) {
         var v = st.values[p.ref] || {};
@@ -1309,6 +1627,23 @@
     });
     Array.prototype.forEach.call(root.querySelectorAll('tbody tr'), mark);
     keepAboveKeyboard(root);
+    root.querySelector('#refillBtn').onclick = function () { openRefill(pos); };
+    root.querySelector('#countScan').onclick = function () {
+      openScanner(pos, { title: 'Scan a product to count it' }, function (code) {
+        var hit = byBarcode(pos, code);
+        if (!hit) return { ok: false, text: 'No product with barcode ' + code };
+        setTimeout(function () {
+          var tr = root.querySelector('tr[data-ref="' + (window.CSS && CSS.escape ? CSS.escape(hit.ref) : hit.ref) + '"]');
+          if (!tr) return;
+          tr.classList.add('flash');
+          var inp = tr.querySelector('.ct-in');
+          tr.scrollIntoView({ block: 'center' });
+          if (inp) { inp.focus(); inp.select(); }
+          setTimeout(function () { tr.classList.remove('flash'); }, 1500);
+        }, 50);
+        return { ok: true, text: hit.name };
+      });
+    };
     root.querySelector('#countSave').onclick = function () {
       var lines = Object.keys(st.values).map(function (ref) {
         var v = st.values[ref];
@@ -1426,6 +1761,280 @@
     };
   }
 
+  /* ---------------- refill request (from the stock count page) */
+  function openRefill(pos) {
+    var pend = pendingQty(pos);
+    var qty = {};
+    var prods = pos.data.products.slice().sort(function (a, b) { return (a.live - (pend[a.ref] || 0)) - (b.live - (pend[b.ref] || 0)); });
+    var m = modal('<div class="pay-head"><h2>Request a refill</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<p class="small muted" style="margin-top:0">Lowest stock first. Enter how many of each you need.</p>' +
+      '<input class="input" id="rfSearch" type="search" placeholder="Search" style="margin-bottom:8px">' +
+      '<div class="refill-list" id="rfList">' + prods.map(function (p) {
+        var left = p.live - (pend[p.ref] || 0);
+        return '<div class="refill-item" data-name="' + S.esc(p.name.toLowerCase()) + '"><div><div class="cl-name">' + S.esc(p.name) + '</div><div class="small ' + (left <= 2 ? 'neg' : 'muted') + '">' + left + ' left</div></div>' +
+          '<input class="input ct-in" data-rq="' + S.esc(p.ref) + '" inputmode="numeric" placeholder="0"></div>';
+      }).join('') + '</div>' +
+      '<div class="field" style="margin-top:10px"><label for="rfNote">Note (optional)</label><input class="input" id="rfNote" placeholder="e.g. Needed before Saturday"></div>' +
+      '<h3 class="rs-title">Requested by</h3><div id="rfWho">' + namePicker(pos, '', 'rfNames') + '</div>' +
+      '<div id="rfErr"></div><button class="btn btn-accent btn-big btn-block" id="rfSave">Send request</button>');
+    var who = '';
+    function wire() { wirePicker(pos, m.el, function (n) { who = n; }, function () { m.el.querySelector('#rfWho').innerHTML = namePicker(pos, who, 'rfNames'); wire(); }); }
+    wire();
+    m.el.querySelector('#rfSearch').oninput = function () {
+      var q = this.value.trim().toLowerCase();
+      Array.prototype.forEach.call(m.el.querySelectorAll('.refill-item'), function (x) { x.hidden = q && x.getAttribute('data-name').indexOf(q) < 0; });
+    };
+    Array.prototype.forEach.call(m.el.querySelectorAll('[data-rq]'), function (x) {
+      x.oninput = function () { x.value = x.value.replace(/[^0-9]/g, ''); qty[x.getAttribute('data-rq')] = Number(x.value) || 0; };
+    });
+    m.el.querySelector('#rfSave').onclick = function () {
+      var lines = Object.keys(qty).filter(function (r) { return qty[r] > 0; }).map(function (r) { return { ref: r, qty: qty[r] }; });
+      var note = m.el.querySelector('#rfNote').value.trim();
+      var err = !lines.length && !note ? 'Enter the quantities you need.' : !who ? 'Pick your name.' : '';
+      if (err) { m.el.querySelector('#rfErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
+      var r = { id: 'Q' + newSaleId().slice(1), by: who, lines: lines, note: note, clientTime: new Date().toISOString() };
+      enqueue(pos, { qid: r.id, type: 'refill', refill: r });
+      m.close();
+      S.toast('Refill request sent: ' + lines.length + ' product' + (lines.length === 1 ? '' : 's') + '.');
+      flush(pos);
+    };
+  }
+
+  /* ---------------- demo counter: plays per demo game + customers activated, kept on this phone until saved */
+  function demoState(pos) {
+    var d = load(demoKey(pos.eventId), null) || { plays: {}, customers: 0 };
+    d.total = Object.keys(d.plays).reduce(function (a, k) { return a + (d.plays[k] || 0); }, 0);
+    return d;
+  }
+  function setDemo(pos, d) { save(demoKey(pos.eventId), { plays: d.plays, customers: d.customers }); }
+  function saveDemo(pos, by, silent) {
+    var d = demoState(pos);
+    if (!d.total && !d.customers) return false;
+    var entry = { id: 'G' + newSaleId().slice(1), by: by || '', plays: d.plays, customers: d.customers, clientTime: new Date().toISOString() };
+    enqueue(pos, { qid: entry.id, type: 'demo', demo: entry });
+    drop(demoKey(pos.eventId));
+    if (!silent) S.toast('Demo counter saved: ' + d.total + ' plays, ' + d.customers + ' customers activated.');
+    return true;
+  }
+  function renderDemo(pos) {
+    var root = pos.el.querySelector('#pos');
+    var demos = pos.data.products.filter(function (p) { return p.demo > 0; });
+    var d = demoState(pos);
+    root.innerHTML = '<div class="co demo-page">' + pageTop(pos, 'Demo counter') +
+      '<section class="co-card demo-cust"><div><b>Customers activated</b><div class="small muted">People who played or got a demo at the stand</div></div>' +
+      '<div class="qty big-qty"><button id="custDec" aria-label="One less">−</button><span id="custN">' + d.customers + '</span><button id="custInc" aria-label="One more">+</button></div></section>' +
+      (demos.length ? '<p class="small muted">Tap a game each time it is played. Counts stay on this phone until the day is closed (or you press Save).</p>' +
+        '<div class="tiles demo-tiles">' + demos.map(function (p) {
+          var pic = picUrl(p.picture), n = d.plays[p.ref] || 0;
+          return '<div class="tile demo-tile' + (n ? ' in-cart' : '') + '" data-ref="' + S.esc(p.ref) + '" role="button" tabindex="0"><span class="tile-img">' + (pic
+            ? '<img src="' + S.esc(pic) + '" alt="" loading="lazy" onerror="this.parentNode.querySelector(\'.ph\').hidden=false;this.remove()">' : '') +
+            '<span class="ph"' + (pic ? ' hidden' : '') + '>' + S.esc(initials(p.name)) + '</span>' +
+            '<span class="demo-n">' + n + '</span>' + (n ? '<button class="demo-dec" data-ddec="' + S.esc(p.ref) + '" aria-label="One less">−</button>' : '') + '</span>' +
+            '<span class="tile-name">' + S.esc(p.name) + '</span></div>';
+        }).join('') + '</div>'
+        : '<div class="card empty"><p class="muted">No demo units in this event. Demo quantities are set in the Listing tab (Demo Qty).</p></div>') +
+      '<div class="demo-foot"><span class="small muted">Total <b>' + d.total + '</b> plays</span><button class="btn btn-ghost" id="demoSave">Save now</button></div></div>';
+    wireTop(pos, root);
+    function bump(ref, delta) {
+      var s2 = demoState(pos);
+      s2.plays[ref] = Math.max(0, (s2.plays[ref] || 0) + delta);
+      if (!s2.plays[ref]) delete s2.plays[ref];
+      setDemo(pos, s2);
+      if (navigator.vibrate && delta > 0) navigator.vibrate(25);
+      renderDemo(pos);
+    }
+    var tiles = root.querySelector('.demo-tiles');
+    if (tiles) tiles.onclick = function (e) {
+      var dec = e.target.closest('[data-ddec]');
+      if (dec) return bump(dec.getAttribute('data-ddec'), -1);
+      var t = e.target.closest('.demo-tile');
+      if (t) bump(t.getAttribute('data-ref'), 1);
+    };
+    function cust(delta) { var s2 = demoState(pos); s2.customers = Math.max(0, (s2.customers || 0) + delta); setDemo(pos, s2); root.querySelector('#custN').textContent = s2.customers; }
+    root.querySelector('#custInc').onclick = function () { cust(1); if (navigator.vibrate) navigator.vibrate(25); };
+    root.querySelector('#custDec').onclick = function () { cust(-1); };
+    root.querySelector('#demoSave').onclick = function () {
+      var open = openShiftNames(pos);
+      if (!saveDemo(pos, pos.data.staff.filter(function (n) { return open[n]; }).join(', '))) { S.toast('Nothing to save yet.'); return; }
+      flush(pos);
+      renderDemo(pos);
+    };
+  }
+
+  /* ---------------- customers page */
+  function renderCustomers(pos) {
+    var root = pos.el.querySelector('#pos');
+    var list = load(contactsKey(pos.eventId), []);
+    root.innerHTML = '<div class="co">' + pageTop(pos, 'Customers') +
+      '<section class="co-card"><h3>New contact</h3><p class="small muted" style="margin-top:0">All optional. Fill what the customer agrees to give.</p>' + contactFields() +
+      '<div class="field"><label for="cuNote">Note</label><input class="input" id="cuNote" placeholder="e.g. Interested in strategy games, wants the newsletter"></div>' +
+      '<div id="cuErr"></div><button class="btn btn-accent btn-big btn-block" id="cuSave">Save contact</button></section>' +
+      '<section class="co-card"><h3>Saved on this phone</h3>' + (list.length ? list.slice(0, 30).map(function (c) {
+        return '<div class="contact-row"><b>' + S.esc(c.name || '—') + '</b> <span class="small muted">' + S.esc([c.phone, c.email].filter(Boolean).join(' · ')) + '</span>' +
+          '<div class="small muted">' + new Date(c.at).toTimeString().slice(0, 5) + (c.sale ? ' · with a sale' : '') + '</div></div>';
+      }).join('') : '<p class="muted small">None yet.</p>') + '</section></div>';
+    wireTop(pos, root);
+    root.querySelector('#cuSave').onclick = function () {
+      var c = readContact(root);
+      if (!c) { root.querySelector('#cuErr').innerHTML = '<div class="form-error">Enter a name, phone or email.</div>'; return; }
+      var open = openShiftNames(pos);
+      enqueueContact(pos, c, '', pos.data.staff.filter(function (n) { return open[n]; }).join(', '));
+      S.toast('Contact saved' + (c.name ? ': ' + c.name : '') + '.');
+      flush(pos);
+      renderCustomers(pos);
+    };
+  }
+
+  /* resolves once the queue is empty (or after the timeout) */
+  function waitQueue(pos, ms) {
+    var until = Date.now() + ms;
+    return new Promise(function (res) {
+      (function check() {
+        flush(pos);
+        if (!queue(pos).some(function (x) { return !x.error; }) || Date.now() > until) return res();
+        setTimeout(check, 700);
+      })();
+    });
+  }
+
+  /* ---------------- WhatsApp summary: a picture (shared with the phone's share sheet), text as a fallback */
+  function shareSummary(o) {
+    S = window.SHN;
+    S.toast('Preparing the summary…');
+    return S.api('daySummary', { eventId: o.eventId, day: o.day || null }, { token: o.token, quiet: true }).then(function (res) {
+      var d = res.summary;
+      var text = summaryText(d);
+      return drawSummary(d).then(function (blob) {
+        var name = 'SHN LEB - ' + d.event + ' - Day ' + (d.day || '') + '.png';
+        var file = null;
+        try { file = blob && new File([blob], name, { type: 'image/png' }); } catch (e) { file = null; }
+        if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+          return navigator.share({ files: [file], text: text }).catch(function (err) { if (err && err.name !== 'AbortError') throw err; });
+        }
+        // no picture sharing on this device: show the picture to save, and open WhatsApp with the text
+        showSummaryImage(blob, name, text);
+      });
+    }).catch(function (err) { S.toast(err.message || 'Could not prepare the summary.', true); throw err; });
+  }
+
+  function summaryText(d) {
+    var L = [];
+    L.push('*SHN LEB · ' + d.event + '*');
+    L.push((d.day ? 'Day ' + d.day + ' · ' : '') + niceDate(d.date) + (d.status === 'Open' ? ' (still open)' : ''));
+    L.push('');
+    L.push('Sales: ' + S.money(d.sales) + (d.targetSales ? ' (target ' + S.money(d.targetSales) + ')' : ''));
+    L.push('Units: ' + d.units + (d.targetQty ? ' (target ' + d.targetQty + ')' : '') + ' · Sales made: ' + d.tickets + ' · Average: ' + S.money(d.avgTicket));
+    L.push('Cash ' + S.money(d.cash) + ' · Online ' + S.money(d.online) + (d.returns ? ' · Returns ' + S.money(d.returns) : ''));
+    if (d.products.length) { L.push(''); L.push('Top games:'); d.products.forEach(function (p) { L.push('• ' + p.units + '× ' + p.name); }); }
+    if (d.demoPlays || d.customersActivated) L.push('', 'Demo plays: ' + d.demoPlays + ' · Customers activated: ' + d.customersActivated);
+    if (d.contacts) L.push('Contacts collected: ' + d.contacts);
+    if (d.cashDiffUsd != null || d.stockDiff != null) {
+      L.push('', 'Closing check: cash ' + (d.cashDiffUsd === 0 && !d.cashDiffLbp ? 'OK' : 'off by ' + S.money(d.cashDiffUsd || 0) + ' / ' + S.num(d.cashDiffLbp || 0) + ' LBP') +
+        (d.stockDiff != null ? ' · stock ' + (d.stockDiff === 0 ? 'OK' : 'off by ' + d.stockDiff) : ''));
+    }
+    if (d.refills.length) { L.push('', 'Refill requests:'); d.refills.forEach(function (r) { L.push('• ' + (r.lines.map(function (l) { return l.qty + '× ' + l.name; }).join(', ') || '') + (r.note ? ' (' + r.note + ')' : '')); }); }
+    if (d.notes) L.push('', 'Notes: ' + d.notes);
+    return L.join('\n');
+  }
+
+  var logoImg = null;
+  function loadLogo() {
+    if (logoImg) return Promise.resolve(logoImg);
+    return new Promise(function (res) {
+      var im = new Image();
+      im.onload = function () { logoImg = im; res(im); };
+      im.onerror = function () { res(null); };
+      im.src = 'assets/logo-white.png';
+    });
+  }
+
+  function drawSummary(d) {
+    return loadLogo().then(function (logo) {
+      var W = 1080, pad = 64;
+      var c = document.createElement('canvas');
+      var x = c.getContext('2d');
+      var rows = [];
+      // measure height first
+      var extra = (d.products.length ? 60 + d.products.length * 52 : 0) + (d.refills.length ? 60 + d.refills.length * 48 : 0) + (d.notes ? 140 : 0) +
+        (d.cashDiffUsd != null || d.stockDiff != null ? 90 : 0);
+      c.width = W; c.height = 760 + extra;
+      x.fillStyle = '#f7f2ec'; x.fillRect(0, 0, W, c.height);
+      x.fillStyle = '#231F20'; x.fillRect(0, 0, W, 210);
+      if (logo) { var h = 76, w = logo.width * h / logo.height; x.drawImage(logo, pad, 40, w, h); }
+      x.fillStyle = '#EB5C24'; x.fillRect(0, 206, W, 8);
+      x.fillStyle = '#fff'; x.font = '600 40px -apple-system, Segoe UI, Roboto, Arial, sans-serif';
+      x.fillText(fit(x, d.event, W - 2 * pad), pad, 172);
+      x.fillStyle = '#c9c3bd'; x.font = '28px -apple-system, Segoe UI, Roboto, Arial, sans-serif';
+      var sub = (d.day ? 'Day ' + d.day + ' · ' : '') + niceDate(d.date) + (d.status === 'Open' ? ' · still open' : '');
+      x.textAlign = 'right'; x.fillText(sub, W - pad, 80); x.textAlign = 'left';
+      var y = 270;
+      var box = function (bx, by, bw, label, value, sub2, color) {
+        x.fillStyle = '#fff'; roundRect(x, bx, by, bw, 150, 22); x.fill();
+        x.fillStyle = '#7a736d'; x.font = '26px -apple-system, Segoe UI, Roboto, Arial, sans-serif'; x.fillText(label, bx + 28, by + 46);
+        x.fillStyle = color || '#231F20'; x.font = '700 52px -apple-system, Segoe UI, Roboto, Arial, sans-serif'; x.fillText(value, bx + 28, by + 106);
+        if (sub2) { x.fillStyle = '#7a736d'; x.font = '24px -apple-system, Segoe UI, Roboto, Arial, sans-serif'; x.fillText(sub2, bx + 28, by + 138); }
+      };
+      var bw = (W - 2 * pad - 24) / 2;
+      var hit = d.targetSales ? (d.sales >= d.targetSales ? '✓ target ' + S.money(d.targetSales) : 'target ' + S.money(d.targetSales)) : '';
+      box(pad, y, bw, 'Sales', S.money(d.sales), hit, '#EB5C24');
+      box(pad + bw + 24, y, bw, 'Units sold', String(d.units), d.tickets + (d.tickets === 1 ? ' sale' : ' sales') + ' · avg ' + S.money(d.avgTicket));
+      y += 174;
+      box(pad, y, bw, 'Cash · Online', S.money(d.cash), S.money(d.online) + ' online' + (d.returns ? ' · returns ' + S.money(d.returns) : ''));
+      box(pad + bw + 24, y, bw, 'Demo plays', String(d.demoPlays), d.customersActivated + ' customers activated' + (d.contacts ? ' · ' + d.contacts + ' contacts' : ''));
+      y += 200;
+      var head = function (t) { y += 10; x.fillStyle = '#EB5C24'; x.font = '600 30px -apple-system, Segoe UI, Roboto, Arial, sans-serif'; x.fillText(t, pad, y); y += 46; };
+      var line = function (t, color) { x.fillStyle = color || '#231F20'; x.font = '30px -apple-system, Segoe UI, Roboto, Arial, sans-serif'; x.fillText(fit(x, t, W - 2 * pad), pad, y); y += 48; };
+      if (d.products.length) { head('Top games'); d.products.forEach(function (p) { line(p.units + '×  ' + p.name); }); y += 14; }
+      if (d.cashDiffUsd != null || d.stockDiff != null) {
+        head('Closing check');
+        var cashOk = d.cashDiffUsd === 0 && !d.cashDiffLbp;
+        line('Cash ' + (cashOk ? '✓ correct' : 'off by ' + S.money(d.cashDiffUsd || 0) + ' / ' + S.num(d.cashDiffLbp || 0) + ' LBP') +
+          (d.stockDiff != null ? '   ·   Stock ' + (d.stockDiff === 0 ? '✓ correct' : 'off by ' + d.stockDiff) : ''), cashOk && !d.stockDiff ? '#1f7a3a' : '#b42318');
+      }
+      if (d.refills.length) { head('Refill requests'); d.refills.forEach(function (r) { line(r.lines.map(function (l) { return l.qty + '× ' + l.name; }).join(', ') + (r.note ? ' (' + r.note + ')' : '')); }); }
+      if (d.notes) { head('Notes'); wrap(x, d.notes, W - 2 * pad, 3).forEach(function (t) { line(t, '#4a4440'); }); }
+      x.fillStyle = '#9a938d'; x.font = '22px -apple-system, Segoe UI, Roboto, Arial, sans-serif';
+      x.fillText('SHN LEB Events', pad, c.height - 34);
+      // crop to content
+      var outH = Math.min(c.height, Math.max(y + 40, 700));
+      var o = document.createElement('canvas'); o.width = W; o.height = outH;
+      var ox = o.getContext('2d'); ox.drawImage(c, 0, 0);
+      ox.fillStyle = '#f7f2ec'; ox.fillRect(0, outH - 70, W, 70);
+      ox.fillStyle = '#9a938d'; ox.font = '22px -apple-system, Segoe UI, Roboto, Arial, sans-serif'; ox.fillText('SHN LEB Events', pad, outH - 30);
+      return new Promise(function (res) { o.toBlob(function (b) { res(b); }, 'image/png'); });
+    });
+  }
+  function niceDate(iso) {
+    var p = String(iso || '').split('-');
+    if (p.length !== 3) return String(iso || '');
+    var dt = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+    return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dt.getDay()] + ' ' + dt.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][dt.getMonth()] + ' ' + p[0];
+  }
+  function roundRect(x, a, b, w, h, r) { x.beginPath(); x.moveTo(a + r, b); x.arcTo(a + w, b, a + w, b + h, r); x.arcTo(a + w, b + h, a, b + h, r); x.arcTo(a, b + h, a, b, r); x.arcTo(a, b, a + w, b, r); x.closePath(); }
+  function fit(x, t, w) { t = String(t); if (x.measureText(t).width <= w) return t; while (t.length > 3 && x.measureText(t + '…').width > w) t = t.slice(0, -1); return t + '…'; }
+  function wrap(x, t, w, maxLines) {
+    var words = String(t).split(/\s+/), out = [], cur = '';
+    words.forEach(function (wd) { var n = cur ? cur + ' ' + wd : wd; if (x.measureText(n).width > w && cur) { out.push(cur); cur = wd; } else cur = n; });
+    if (cur) out.push(cur);
+    if (out.length > maxLines) { out = out.slice(0, maxLines); out[maxLines - 1] += '…'; }
+    return out;
+  }
+  function showSummaryImage(blob, name, text) {
+    var url = blob ? URL.createObjectURL(blob) : '';
+    var m = modal('<div class="pay-head"><h2>Day summary</h2><button class="link-btn" data-close>Close</button></div>' +
+      (url ? '<img class="summary-img" src="' + url + '" alt="Day summary">' : '') +
+      '<div class="dialog-actions">' + (url ? '<a class="btn btn-ghost" href="' + url + '" download="' + S.esc(name) + '">Save picture</a>' : '') +
+      '<a class="btn btn-accent" href="https://wa.me/?text=' + encodeURIComponent(text) + '" target="_blank" rel="noopener">Send as text on WhatsApp</a></div>');
+    return m;
+  }
+
+  /* a number field that already has a value: tapping it selects the whole value */
+  document.addEventListener('focusin', function (e) {
+    var t = e.target;
+    if (!t || t.tagName !== 'INPUT' || !/^(numeric|decimal)$/.test(t.getAttribute('inputmode') || '') || !t.value) return;
+    setTimeout(function () { try { t.select(); } catch (x) { /* some inputs refuse */ } }, 0);
+  });
+
   /* ---------------- recent sales */
   function openRecent(pos) {
     var q = queue(pos);
@@ -1464,8 +2073,9 @@
     var m = modal(
       '<div class="pay-head"><h2>Recent sales</h2><button class="link-btn" data-close>Close</button></div>' +
       (failed.length ? '<h3 class="rs-title neg">Not saved</h3>' + failed.map(function (x) {
-        var label = { clock: 'Clock ' + x.direction, count: 'Stock count', cash: x.cash && x.cash.kind === 'handover' ? 'Handover' : 'Cash count', day: 'Day ' + (x.day && x.day.action) }[x.type];
-        return row(label ? { total: 0, method: label, seller: x.name || (x.count && x.count.countedBy) || (x.cash && x.cash.by) || (x.day && x.day.by) || '', lines: [] } : pendingRow(x),
+        var label = { clock: 'Clock ' + x.direction, count: 'Stock count', cash: x.cash && x.cash.kind === 'handover' ? 'Handover' : 'Cash count', day: 'Day ' + (x.day && x.day.action),
+          customer: 'Customer contact', refill: 'Refill request', demo: 'Demo counter' }[x.type];
+        return row(label ? { total: 0, method: label, seller: x.name || (x.count && x.count.countedBy) || (x.cash && x.cash.by) || (x.day && x.day.by) || (x.customer && x.customer.name) || (x.refill && x.refill.by) || (x.demo && x.demo.by) || '', lines: [] } : pendingRow(x),
           '<div><div class="small neg">' + S.esc(x.error) + '</div><button class="btn btn-ghost btn-sm" data-discard="' + S.esc(x.qid) + '">Discard</button></div>');
       }).join('') : '') +
       (waiting.length ? '<h3 class="rs-title">Waiting to send</h3>' + waiting.map(function (x) { return row(pendingRow(x)); }).join('') : '') +
@@ -1492,5 +2102,5 @@
     });
   }
 
-  window.SHN_POS = { staff: staff, mount: mount, unmount: unmount };
+  window.SHN_POS = { staff: staff, mount: mount, unmount: unmount, shareSummary: shareSummary };
 })();

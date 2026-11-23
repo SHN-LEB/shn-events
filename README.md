@@ -2,6 +2,9 @@
 
 Event sales portal for Superheated Neurons: events home, per-event POS, inventory, cash, shifts, expenses and P&L.
 
+New events start as **drafts** (Info + Break-even only, kept in the master sheet). **Launch event** creates the event's
+Google Sheet, named `YYYYMMDD - event name`.
+
 - **App:** https://shn-leb.github.io/shn-events/ (GitHub Pages, files in this repository)
 - **Back office:** Google Apps Script (`apps-script/Code.gs`) + Google Sheets
   - `SHN Events — Master` sheet: events list and settings (admin password, COGS %, defaults)
@@ -25,4 +28,8 @@ Each event's staff link is `https://shn-leb.github.io/shn-events/?e=<event id>` 
 ## Updating the back office
 
 Paste the new `Code.gs`, save, then **Deploy → Manage deployments →** pencil → Version **New version** → Deploy.
-The URL stays the same.
+The URL stays the same. When a version adds master settings or columns (e.g. v1.8: `MANAGER_PIN`, `RETURN_APPROVAL_USD`,
+`COMMISSION_THRESHOLD`, `CASH_WARN_USD`, `CASH_WARN_LBP`, `DEFAULT_STAFF_RATE`), run **setup** once after saving.
+
+Barcode scanning uses the phone's own barcode reader where there is one, else [ZXing](https://github.com/zxing-js/library)
+(`assets/vendor/zxing.min.js`, Apache License 2.0), loaded only when someone taps scan.
