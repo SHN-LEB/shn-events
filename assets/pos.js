@@ -1069,7 +1069,8 @@
       '<div class="seg" id="paySeg">' + ['Cash', 'Online', 'Split'].map(function (x) {
         return '<button data-m="' + x + '" class="' + (pay.method === x ? 'active' : '') + '">' + (x === 'Split' ? 'Cash + online' : x) + '</button>';
       }).join('') + '</div>' +
-      (d.whishLink ? '<button class="whish-btn" id="whishBtn" hidden><img src="assets/whish.png" alt="">Show Whish QR</button>' : '') +
+      '<div class="qr-btns" id="qrBtns" hidden>' + (d.whishLink ? '<button class="whish-btn" id="whishBtn"><img src="assets/whish.png" alt="">Show Whish QR</button>' : '') +
+      (cardLink() ? '<button class="whish-btn" id="cardBtn"><span class="card-ico">' + ICONS.card + '</span>Pay by Card Online</button>' : '') + '</div>' +
       '<div class="field" id="onlineField"><label for="payOnline">Paid online (USD)</label><input class="input money-in" id="payOnline" inputmode="decimal" placeholder="0" value="' + S.esc(pay.online) + '"></div>' +
       '<div class="two">' +
       '<div class="field cashf"><label for="payUsd">Received USD</label><input class="input money-in" id="payUsd" inputmode="decimal" placeholder="0" value="' + S.esc(pay.recvUsd) + '"></div>' +
@@ -1142,7 +1143,8 @@
       function () { return pos.data.lbpStep || 5000; }, function (u, l) { pay.changeUsd = u; pay.changeLbp = l; clearErr(); });
     keepAboveKeyboard(root);
     $('#payConfirm').onclick = function () { confirmSale(pos); };
-    if ($('#whishBtn')) $('#whishBtn').onclick = function () { showWhish(pos, calc(pos).online); };
+    if ($('#whishBtn')) $('#whishBtn').onclick = function () { showWhish(pos, calc(pos).online, 'whish'); };
+    if ($('#cardBtn')) $('#cardBtn').onclick = function () { showWhish(pos, calc(pos).online, 'card'); };
     wireErrorSlot(pos, root);
     update(pos);
   }
@@ -1217,9 +1219,12 @@
     Array.prototype.forEach.call(m.el.querySelectorAll('.key'), function (b) { b.onclick = function () { press(b.getAttribute('data-k')); }; });
   }
 
-  /* full-screen Whish QR for the customer to scan */
-  function showWhish(pos, amount) {
-    var link = pos.data.whishLink;
+  function cardLink() { return (window.SHN_CONFIG && window.SHN_CONFIG.CARD_PAY_LINK) || ''; }
+
+  /* full-screen QR for the customer to scan: Whish, or the card payment page (Stripe) */
+  function showWhish(pos, amount, kind) {
+    var card = kind === 'card';
+    var link = card ? cardLink() : pos.data.whishLink;
     if (!link || !window.qrcode) return;
     var qr = window.qrcode(0, 'M');
     qr.addData(link);
@@ -1230,12 +1235,22 @@
       '<rect x="-4" y="-4" width="' + (n + 8) + '" height="' + (n + 8) + '" fill="#fff"/><path d="' + cells + '" fill="#000"/></svg>';
     var wrap = document.createElement('div');
     wrap.className = 'whish-full';
-    wrap.innerHTML = '<div class="whish-inner"><img class="whish-logo" src="assets/whish.png" alt="Whish Money">' +
-      '<div class="whish-amount">' + (amount > 0 ? 'Pay ' + S.money(amount) : 'Pay with Whish') + '</div>' +
-      '<div class="whish-sub">Scan with the Whish app to transfer</div>' + svg +
+    wrap.innerHTML = '<div class="whish-inner">' + (card ? '<div class="whish-logo card-logo">' + ICONS.card + '</div>' : '<img class="whish-logo" src="assets/whish.png" alt="Whish Money">') +
+      '<div class="whish-amount">' + (amount > 0 ? 'Pay ' + S.money(amount) : card ? 'Pay by card' : 'Pay with Whish') + '</div>' +
+      '<div class="whish-sub">' + (card ? 'Scan with your phone camera, enter ' + (amount > 0 ? S.money(amount) : 'the amount') + ' and pay by card' : 'Scan with the Whish app to transfer') + '</div>' + svg +
       '<button class="btn btn-primary btn-big btn-block" id="whishDone">Done</button></div>';
     document.body.appendChild(wrap);
-    wrap.querySelector('#whishDone').onclick = function () { wrap.remove(); };
+    wrap.querySelector('#whishDone').onclick = function () {
+      wrap.remove();
+      // before the sale is closed: check the amount on the customer's phone
+      var m = modal('<div class="pay-check">' + (card ? '<div class="card-logo small-logo">' + ICONS.card + '</div>' : '<img class="whish-logo small-logo" src="assets/whish.png" alt="">') +
+        '<h2>Check the customer\'s phone</h2>' +
+        '<p>Make sure the payment went through ' + (card ? 'by card' : 'on Whish') + (amount > 0 ? ' for exactly' : '') + '</p>' +
+        (amount > 0 ? '<div class="whish-amount">' + S.money(amount) + '</div>' : '') +
+        '<p class="small muted">If the amount is different, sort it out with the customer before confirming the sale.</p>' +
+        '<button class="btn btn-accent btn-big btn-block" data-close>Done</button></div>');
+      return m;
+    };
   }
 
   function calc(pos) {
@@ -1265,7 +1280,7 @@
     $('#coOrderDisc').textContent = t.disc > 0 ? '−' + S.num(t.disc) + '%' : '%';
     var cash = pay.method !== 'Online';
     $('#onlineField').hidden = pay.method !== 'Split';
-    if ($('#whishBtn')) $('#whishBtn').hidden = pay.method === 'Cash';
+    if ($('#qrBtns')) $('#qrBtns').hidden = pay.method === 'Cash';
     Array.prototype.forEach.call(root.querySelectorAll('.cashf'), function (f) {
       f.classList.toggle('off', !cash);
       f.querySelector('input').disabled = !cash;
@@ -1563,6 +1578,7 @@
     demo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.3"/><circle cx="15.5" cy="15.5" r="1.3"/><circle cx="15.5" cy="8.5" r="1.3"/><circle cx="8.5" cy="15.5" r="1.3"/></svg>',
     customers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c.6-3.4 3-5.4 6-5.4s5.4 2 6 5.4"/><path d="M16 4.6a3.2 3.2 0 0 1 0 6.3M18.5 14.9c1.4.8 2.3 2.5 2.5 5.1"/></svg>',
     person: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="8" r="3.4"/><path d="M3.5 20c.7-3.6 3.2-5.6 6.5-5.6 1.6 0 3 .5 4.1 1.4"/><path d="M19 14v6M16 17h6"/></svg>',
+    card: '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 10h19M6.5 15h4"/></svg>',
     refresh: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>',
     scan: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8v8M10 8v8M13 8v8M16.5 8v8"/></svg>'
   };
