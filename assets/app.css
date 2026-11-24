@@ -707,3 +707,22 @@ body.pos-mode .topbar-event { max-width: none; flex: 1; margin-left: 0; white-sp
 .autosave { font-size: 13px; }
 .autosave.ok { color: var(--good); }
 .autosave.bad { color: var(--bad); }
+
+/* ================================================================ v1.9 */
+.tg-tbl .input { width: 100%; }
+.tg-tbl .tg-num { width: 96px; text-align: right; margin-left: auto; display: block; }
+.tg-tbl .tg-low { text-align: center; width: 90px; font-size: 12px; }
+.tg-tbl .tg-low input { width: 18px; height: 18px; }
+.tg-tbl .tg-ach { font-weight: 800; font-size: 15px; }
+.tg-score td { font-weight: 800; font-size: 16px; border-top: 2px solid var(--navy); }
+#tgScore { font-size: 22px; }
+.good-t { color: var(--good); }
+.scan-pop { position: absolute; left: 12px; right: 12px; bottom: 12px; background: #fff; color: var(--ink); border-radius: 16px; padding: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.35); z-index: 3; }
+.scan-pop .sp-name { font-weight: 800; font-size: 17px; line-height: 1.25; }
+.scan-pop .sp-sub { color: var(--muted); font-size: 14px; margin: 2px 0 10px; }
+.scan-pop .sp-qty { display: flex; justify-content: center; margin-bottom: 12px; }
+.scan-pop .sp-qty input { width: 64px; text-align: center; font-size: 22px; font-weight: 800; border: 1px solid var(--line); border-radius: 10px; height: 52px; }
+.scan-pop .sp-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.scan-pop .sp-cancel { display: block; margin: 10px auto 0; }
+.scan-pop.bad .sp-name { color: var(--bad); }
+.scan-view { position: relative; }

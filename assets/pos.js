@@ -428,12 +428,7 @@
       if (hit) { e.preventDefault(); addToCart(pos, hit.ref, 1); S.toast('Added: ' + hit.name); pos.query = ''; search.value = ''; drawTiles(pos); }
     });
     root.querySelector('#posScan').onclick = function () {
-      openScanner(pos, { title: 'Scan products', continuous: true }, function (code) {
-        var hit = byBarcode(pos, code);
-        if (!hit) return { ok: false, text: 'No product with barcode ' + code };
-        addToCart(pos, hit.ref, 1);
-        return { ok: true, text: 'Added: ' + hit.name + ' (' + inCart(pos, hit.ref) + ' in sale)' };
-      });
+      openScanner(pos, { title: 'Scan products', popup: true }, null);
     };
     Array.prototype.forEach.call(root.querySelectorAll('[data-cat]'), function (b) {
       b.onclick = function () { pos.cat = b.getAttribute('data-cat'); render(pos); };
@@ -730,7 +725,7 @@
       '<div class="scan-manual"><input class="input" id="scanType" inputmode="numeric" placeholder="Or type the barcode"><button class="btn btn-primary" id="scanTypeGo">OK</button></div>';
     document.body.appendChild(wrap);
     var video = wrap.querySelector('#scanVideo'), msg = wrap.querySelector('#scanMsg');
-    var stream = null, stopped = false, last = '', lastAt = 0, zx = null, raf = null;
+    var stream = null, stopped = false, last = '', lastAt = 0, zx = null, raf = null, paused = false;
     function stop() {
       stopped = true;
       if (raf) clearTimeout(raf);
@@ -739,16 +734,60 @@
       wrap.remove();
     }
     function got(code) {
+      if (paused) return;
       var now = Date.now();
       if (code === last && now - lastAt < 2000) return;
       last = code; lastAt = now;
-      var r = onCode(code) || { ok: true };
+      if (opts.popup) { paused = true; showPop(code); return; }
+      var r = onCode ? onCode(code) || { ok: true } : { ok: true };
       msg.textContent = r.text || code;
       msg.className = 'scan-msg ' + (r.ok ? 'good' : 'bad');
       if (navigator.vibrate) navigator.vibrate(r.ok ? 60 : [40, 60, 40]);
       if (r.ok && !opts.continuous) stop();
     }
     wrap.querySelector('#scanDone').onclick = stop;
+    /* POS: what was scanned, how many, then OK (back to the POS) or Scan another game */
+    function showPop(code) {
+      var hit = byBarcode(pos, code);
+      var view = wrap.querySelector('.scan-view');
+      var pop = document.createElement('div');
+      pop.className = 'scan-pop' + (hit ? '' : ' bad');
+      if (navigator.vibrate) navigator.vibrate(hit ? 60 : [40, 60, 40]);
+      function resume() { pop.remove(); paused = false; lastAt = Date.now(); msg.textContent = 'Point the camera at the barcode.'; msg.className = 'scan-msg'; }
+      if (!hit) {
+        pop.innerHTML = '<div class="sp-name">No game with this barcode</div><div class="sp-sub">' + S.esc(code) + '</div>' +
+          '<div class="sp-btns"><button class="btn btn-ghost" data-sp="close">Close</button><button class="btn btn-primary" data-sp="again">Try again</button></div>';
+        view.appendChild(pop);
+        pop.querySelector('[data-sp="again"]').onclick = resume;
+        pop.querySelector('[data-sp="close"]').onclick = stop;
+        return;
+      }
+      var already = inCart(pos, hit.ref);
+      var left = stockOf(pos, hit, pendingQty(pos));
+      pop.innerHTML = '<div class="sp-name">' + S.esc(hit.name) + '</div>' +
+        '<div class="sp-sub">' + S.money(hit.price) + (already ? ' · already ' + already + ' in sale' : '') + ' · ' + Math.max(0, left) + ' left</div>' +
+        '<div class="sp-qty"><div class="qty big-qty"><button type="button" data-sp="dec" aria-label="One less">−</button>' +
+        '<input id="spQty" inputmode="numeric" value="1" aria-label="Quantity"><button type="button" data-sp="inc" aria-label="One more">+</button></div></div>' +
+        '<div class="sp-btns"><button class="btn btn-ghost" data-sp="another">Scan another game</button><button class="btn btn-accent" data-sp="ok">OK</button></div>' +
+        '<button class="link-btn sp-cancel" data-sp="cancel">Cancel</button>';
+      view.appendChild(pop);
+      var q = pop.querySelector('#spQty');
+      var val = function () { return Math.max(1, Math.round(Number(q.value) || 1)); };
+      pop.querySelector('[data-sp="dec"]').onclick = function () { q.value = Math.max(1, val() - 1); };
+      pop.querySelector('[data-sp="inc"]').onclick = function () { q.value = val() + 1; };
+      q.oninput = function () { q.value = q.value.replace(/[^0-9]/g, ''); };
+      function add() {
+        var n = val();
+        addToCart(pos, hit.ref, n);
+        return n;
+      }
+      pop.querySelector('[data-sp="ok"]').onclick = function () { add(); stop(); render(pos); };
+      pop.querySelector('[data-sp="another"]').onclick = function () {
+        var n = add(); resume();
+        msg.textContent = 'Added ' + n + '× ' + hit.name + '. Scan the next game.'; msg.className = 'scan-msg good';
+      };
+      pop.querySelector('[data-sp="cancel"]').onclick = resume;
+    }
     var typed = wrap.querySelector('#scanType');
     wrap.querySelector('#scanTypeGo').onclick = function () { if (typed.value.trim()) { last = ''; got(typed.value.trim()); typed.value = ''; } };
     typed.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); wrap.querySelector('#scanTypeGo').click(); } });

@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -21,7 +21,7 @@ const LBP_STEP = 5000; // LBP change is rounded to this step
 
 const MASTER_TABS = {
   Events: ['Event ID', 'Name', 'Type', 'Venue', 'Start Date', 'End Date', 'Status', 'Sheet URL', 'Sheet ID', 'Created At',
-    'Info (app)', 'Break-even (app)', 'Copy From', 'Days Sold', 'Avg Units / Day', 'Avg Sales / Day'],
+    'Info (app)', 'Break-even (app)', 'Copy From', 'Days Sold', 'Avg Units / Day', 'Avg Sales / Day', 'Learnings (app)'],
   Settings: ['Setting', 'Value', 'Notes']
 };
 
@@ -64,11 +64,13 @@ const EVENT_TYPES = ['Sales', 'Awareness'];
 /* Every tab of an event sheet. '' leaves an empty separator column between blocks.
    Settings: A-C event settings, E-I staff list, K-O this event's catalogue.
    (Events created before v1.8 have a Threshold column in the staff list and the catalogue in L-P: still read.)
-   Listing:  A-G products from the catalogue, I-R external products, T all product names (hidden helper). */
+   Listing:  A-G products from the catalogue, I-K tools & materials (management only), M-V external products,
+             X all product names (hidden helper). */
 const STAFF_COL = 5;      // Settings!E
 const CATALOG_COL = 11;   // Settings!K
-const CONS_COL = 9;       // Listing!I
-const ALL_NAMES_COL = 20; // Listing!T
+const MAT_COL = 9;        // Listing!I
+const CONS_COL = 13;      // Listing!M
+const ALL_NAMES_COL = 24; // Listing!X
 /* Colour per column group: [tab, first col, last col, header colour, body colour] */
 const BLOCK_COLORS = [
   ['Settings', 1, 3, '#d9d9d9', '#f3f3f3'],                                   // event settings: grey
@@ -76,6 +78,7 @@ const BLOCK_COLORS = [
   ['Settings', CATALOG_COL, CATALOG_COL + 4, '#d9ead3', '#f1f8ee'],           // catalogue: green
   ['Listing', 1, 4, '#a4c2f4', '#c9daf8'],                                    // products, automatic part: darker blue
   ['Listing', 5, 7, '#c9daf8', '#eef4fd'],                                    // products: blue
+  ['Listing', MAT_COL, MAT_COL + 2, '#d9d2e9', '#f4f1fa'],                    // tools & materials: purple
   ['Listing', CONS_COL, CONS_COL + 9, '#fce5cd', '#fef5ec'],                  // external products: orange
   ['Stock Moves', 1, 5, '#d9ead3', '#f1f8ee']                                 // stock moves: green
 ];
@@ -94,6 +97,7 @@ const EVENT_TABS = [
     'Staff Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/item)', 'Commission At/Over Threshold (USD/item)', 'Active (Y/N)', '',
     'Catalogue: Product', 'Ref Code', 'Price (USD)', 'Category', 'Game Family']],
   ['Listing', ['Ref Code', 'Category', 'Game Family', 'Price (USD)', 'Product', 'Opening Qty', 'Demo Qty', '',
+    'Tools & Materials', 'Qty', 'Notes', '',
     'External Product', 'Ref Code', 'Category', 'Price (USD)', 'Opening Qty', 'Demo Qty', 'Partner', 'Pay Type (Fixed/%)', 'Pay Value', 'Picture URL', '',
     'All Products (auto)']],
   ['Stock Moves', ['Date', 'Ref Code', 'Product', 'Qty (+refill / -return)', 'Note']],
@@ -221,6 +225,7 @@ function route_(req) {
     case 'deleteDraft': requireAdmin_(req); return { deleted: deleteDraft_(req.id) };
     case 'saveInfo': requireAdmin_(req); return { event: saveInfo_(req.id, req.event || {}) };
     case 'saveBreakeven': requireAdmin_(req); return { event: saveBreakeven_(req.id, req.breakeven) };
+    case 'saveLearnings': requireAdmin_(req); return { learnings: saveLearnings_(req.id, req.learnings) };
     case 'catalogueNames': requireAdmin_(req); return { names: catalogueNames_() };
     case 'overview': requireAdmin_(req); return { overview: overview_() };
     case 'setRefill': requireAdmin_(req); return { refill: setRefill_(req.id, req.requestId, req.status, req.toStock) };
@@ -353,7 +358,8 @@ function rowToEvent_(r) {
     copyFrom: String(r[12] || ''),
     daysSold: Number(r[13]) || 0,
     avgUnitsPerDay: Number(r[14]) || 0,
-    avgSalesPerDay: Number(r[15]) || 0
+    avgSalesPerDay: Number(r[15]) || 0,
+    learnings: parseJson_(r[16], null)
   };
 }
 
@@ -411,7 +417,7 @@ function createEvent_(req, extra) {
     sh.getRange(r, 1, 1, 13).setValues([[id, f.name, f.type, f.venue, f.startDate, f.endDate, 'Draft', '', '', '',
       JSON.stringify(info), extra.breakeven ? JSON.stringify(extra.breakeven) : '', extra.copyFrom || '']]);
     sh.getRange(r, 10).setNumberFormat('yyyy-mm-dd hh:mm').setValue(createdAt);
-    return rowToEvent_(sh.getRange(r, 1, 1, 16).getValues()[0]);
+    return rowToEvent_(sh.getRange(r, 1, 1, 17).getValues()[0]);
   } finally {
     lock.releaseLock();
   }
@@ -455,6 +461,13 @@ function cleanInfo_(info) {
   const out = {};
   INFO_FIELDS.forEach(function (k) { if (info[k] != null && String(info[k]).trim()) out[k] = String(info[k]).slice(0, 3000); });
   if (Array.isArray(info.focusGames)) out.focusGames = info.focusGames.map(String).filter(Boolean).slice(0, 60);
+  if (Array.isArray(info.targets)) {
+    out.targets = info.targets.slice(0, 40).map(function (t) {
+      const n = t.target === '' || t.target == null ? '' : Number(t.target);
+      return { id: String(t.id || '').slice(0, 20), key: String(t.key || '').slice(0, 20), label: String(t.label || '').slice(0, 200),
+        target: n === '' || isNaN(n) ? '' : n, lower: !!t.lower };
+    }).filter(function (t) { return t.key || t.label || t.target !== ''; });
+  }
   return out;
 }
 
@@ -464,6 +477,21 @@ function saveBreakeven_(id, be) {
   if (text.length > 20000) throw userError_('The break-even simulation is too long to save.', 'invalid');
   found.sheet.getRange(found.row, 12).setNumberFormat('@').setValue(text);
   return getEvent_(id);
+}
+
+/* Learnings tab: notes per topic and the actual result of each target (kept in the master sheet) */
+function saveLearnings_(id, l) {
+  l = l || {};
+  const found = findEventRow_(id);
+  const out = {};
+  ['staffing', 'location', 'setup', 'differently'].forEach(function (k) { if (l[k] != null) out[k] = String(l[k]).slice(0, 5000); });
+  out.actuals = {};
+  Object.keys(l.actuals || {}).slice(0, 60).forEach(function (k) {
+    const v = l.actuals[k];
+    if (v !== '' && v != null && !isNaN(Number(v))) out.actuals[String(k).slice(0, 20)] = Number(v);
+  });
+  found.sheet.getRange(found.row, 17).setNumberFormat('@').setValue(JSON.stringify(out));
+  return out;
 }
 
 /* writes key/value rows in an event's Settings tab (adds the row if missing) */
@@ -523,6 +551,9 @@ function copyFromEvent_(srcId, ss) {
   const ext = lst.filter(function (r) { return String(r[K] || '').trim(); }).map(function (r) { return r.slice(K, K + 10); });
   const to = ss.getSheetByName('Listing');
   if (prods.length) to.getRange(2, 5, prods.length, 3).setValues(prods);
+  const M = MAT_COL - 1;
+  const mats = lst.filter(function (r) { return String(r[M] || '').trim(); }).map(function (r) { return r.slice(M, M + 3); });
+  if (mats.length) to.getRange(2, MAT_COL, mats.length, 3).setValues(mats);
   if (ext.length) {
     to.getRange(2, CONS_COL + 1, ext.length, 1).setNumberFormat('@');
     to.getRange(2, CONS_COL, ext.length, 10).setValues(ext);
@@ -688,14 +719,17 @@ function buildInventoryTabs_(ss, catalogue) {
   lst.getRange(2, CONS_COL + 7, MAX_ROWS, 1).setDataValidation(list(['Fixed', '%']));
   lst.setColumnWidth(CONS_COL, 260);
   // hidden helper: every product name of this event, for the Stock Moves dropdown
-  lst.getRange(1, ALL_NAMES_COL).setFormula('={"All Products (auto)";IFERROR(FILTER({E2:E;I2:I},{E2:E;I2:I}<>""),"")}');
+  lst.setColumnWidth(MAT_COL, 240); lst.setColumnWidth(MAT_COL + 2, 200);
+  const CL = colLetter_(CONS_COL), CL2 = colLetter_(CONS_COL + 1);
+  lst.getRange(1, ALL_NAMES_COL).setFormula('={"All Products (auto)";IFERROR(FILTER({E2:E;' + CL + '2:' + CL + '},{E2:E;' + CL + '2:' + CL + '}<>""),"")}');
   lst.hideColumns(ALL_NAMES_COL);
 
   // Stock Moves: dropdown of this event's products (listing + consignment)
   const moves = ss.getSheetByName('Stock Moves');
-  moves.getRange(1, 2).setFormula('={"Ref Code";ARRAYFORMULA(IF(C2:C="","",IFERROR(VLOOKUP(C2:C,{Listing!E2:E,Listing!A2:A},2,FALSE),IFERROR(VLOOKUP(C2:C,{Listing!I2:I,Listing!J2:J},2,FALSE),""))))}');
+  moves.getRange(1, 2).setFormula('={"Ref Code";ARRAYFORMULA(IF(C2:C="","",IFERROR(VLOOKUP(C2:C,{Listing!E2:E,Listing!A2:A},2,FALSE),IFERROR(VLOOKUP(C2:C,{Listing!' + CL + '2:' + CL + ',Listing!' + CL2 + '2:' + CL2 + '},2,FALSE),""))))}');
   moves.getRange(2, 1, MAX_ROWS, 1).setNumberFormat('yyyy-mm-dd');
-  moves.getRange(2, 3, MAX_ROWS, 1).setDataValidation(strict(lst.getRange('T2:T')));
+  const NL = colLetter_(ALL_NAMES_COL);
+  moves.getRange(2, 3, MAX_ROWS, 1).setDataValidation(strict(lst.getRange(NL + '2:' + NL)));
   moves.setColumnWidth(3, 320);
 
   // colour the column groups, then mark the automatic columns
@@ -768,7 +802,14 @@ function getInventory_(id, asOf) {
       opening: qty(r[5]), demo: qty(r[6]), moves: 0, sold: 0, consignment: false }, 'Listing');
   }
 
-  // consignment block: Listing I-R
+  // tools & materials (not sold, not on the staff link)
+  const materials = [];
+  for (let i = 1; i < prod.length; i++) {
+    const d = String(prod[i][MAT_COL - 1] || '').trim();
+    if (d) materials.push({ description: d, qty: qty(prod[i][MAT_COL]), notes: String(prod[i][MAT_COL + 1] || '') });
+  }
+
+  // consignment block: Listing M-V
   const K = CONS_COL - 1;
   const usedC = {};
   prod.slice(1).forEach(function (r) { const m = String(r[K + 1] || '').match(/^C(\d+)$/); if (m) usedC[Number(m[1])] = true; });
@@ -817,7 +858,7 @@ function getInventory_(id, asOf) {
     if (it.live < 0) warnings.push('"' + it.name + '" shows ' + it.live + ' in stock. Check the opening quantity and stock moves.');
     return it;
   });
-  return { items: list, warnings: warnings };
+  return { items: list, warnings: warnings, materials: materials };
 }
 
 /* Staff list. Events created before v1.8 have a per-person Threshold column (read, still honoured). */

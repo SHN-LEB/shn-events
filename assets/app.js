@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.8.1';
+  var APP_VERSION = '1.9.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var DRAFT_TABS = [
@@ -21,7 +21,8 @@
     { id: 'customers', label: 'Customers' },
     { id: 'expenses', label: 'Expenses' },
     { id: 'dashboard', label: 'Dashboard' },
-    { id: 'pnl', label: 'P&L' }
+    { id: 'pnl', label: 'P&L' },
+    { id: 'learnings', label: 'Learnings' }
   ];
   var TAB_HINT = {
     inventory: 'Opening stock from the SHN Catalogue, demo units, refills and returns, external products and daily counts.',
@@ -413,6 +414,13 @@
     };
     document.getElementById('dupBtn').onclick = function () { openDuplicate(ev); };
 
+    // tab bar: keep where it was, then bring the open tab to the middle
+    var nav = app.querySelector('.tabs'), act = nav && nav.querySelector('.tab.active');
+    if (nav) {
+      nav.scrollLeft = state.tabScroll || 0;
+      if (act) nav.scrollTo({ left: Math.max(0, act.offsetLeft - (nav.clientWidth - act.offsetWidth) / 2), behavior: 'smooth' });
+      nav.addEventListener('scroll', function () { state.tabScroll = nav.scrollLeft; });
+    }
     var body = document.getElementById('tabBody');
     if (tab === 'info') viewInfo(body, ev);
     else if (tab === 'breakeven') viewBreakeven(body, ev);
@@ -421,6 +429,7 @@
     else if (tab === 'pos') window.SHN_POS.mount(body, { eventId: ev.id, token: getToken(), admin: true });
     else if (tab === 'cash' || tab === 'shifts' || tab === 'days' || tab === 'customers') viewReport(body, ev, tab);
     else if (tab === 'expenses' || tab === 'dashboard' || tab === 'pnl') viewPnl(body, ev, tab);
+    else if (tab === 'learnings') viewLearnings(body, ev);
   }
 
   function confirmClose() {
@@ -548,7 +557,6 @@
     ['organizerEmail', 'Organizer email', 'email', ''],
     ['setupTime', 'Setup', 'text', 'e.g. Fri 5 Dec, 10am-2pm'],
     ['teardownTime', 'Teardown', 'text', 'e.g. Wed 31 Dec after closing'],
-    ['objectives', 'Objectives', 'area', 'e.g. 30% profit, 200 customers activated, launch 7zar Shou Season 3'],
     ['notes', 'Other notes', 'area', '']
   ];
 
@@ -577,8 +585,10 @@
       '<div class="field"><label>&nbsp;</label><a class="btn btn-ghost" id="mapsOpen" target="_blank" rel="noopener"' + (info.mapsLink ? ' href="' + f('mapsLink') + '"' : ' hidden') + '>Open in Maps</a></div>' +
       '</div></section>' +
       '<section class="card card-pad"><h3>Organizer and timing</h3><div class="info-grid">' + INFO_FORM.slice(5, 10).map(field).join('') + '</div></section>' +
-      '<section class="card card-pad"><h3>Focus and objectives</h3>' +
-      '<div class="field"><label for="iFocus">Focus games</label><div class="focus-add"><input class="input" id="iFocus" list="catNames" placeholder="Type to search the SHN Catalogue" autocomplete="off">' +
+      '<section class="card card-pad"><h3>Targets</h3><div id="targetsBox"></div>' +
+      (info.objectives ? '<p class="small muted">Earlier notes: ' + esc(info.objectives) + '</p>' : '') + '</section>' +
+      '<section class="card card-pad"><h3>Focus games</h3>' +
+      '<div class="field"><div class="focus-add"><input class="input" id="iFocus" list="catNames" placeholder="Type to search the SHN Catalogue" autocomplete="off">' +
       '<button type="button" class="btn btn-ghost" id="focusAdd">Add</button></div><datalist id="catNames"></datalist><div class="chips focus-chips" id="focusChips"></div></div>' +
       '<div class="info-grid">' + INFO_FORM.slice(10).map(field).join('') + '</div></section>' +
       '<div class="info-save"><span class="small muted">Nothing is mandatory. Changes save by themselves.</span><span class="autosave ok" id="infoState">Saved ✓</span></div>' +
@@ -609,6 +619,29 @@
       });
     }
     drawFocus();
+    info.targets = targetRows(info);
+    function drawTargets() {
+      document.getElementById('targetsBox').innerHTML = '<table class="tbl tg-tbl"><thead><tr><th>Objective</th><th class="num">Target</th><th class="tg-low">Lower is better</th><th></th></tr></thead><tbody>' +
+        info.targets.map(function (t, i) {
+          return '<tr><td>' + (t.key ? '<b>' + esc(t.label) + '</b>' + (TARGET_HINT[t.key] ? '<div class="pref">' + esc(TARGET_HINT[t.key]) + '</div>' : '')
+            : '<input class="input" data-tl="' + i + '" placeholder="Objective" value="' + esc(t.label) + '">') + '</td>' +
+            '<td class="num"><input class="input tg-num" data-tt="' + i + '" inputmode="decimal" placeholder="0" value="' + esc(t.target === '' || t.target == null ? '' : t.target) + '"></td>' +
+            '<td class="tg-low"><input type="checkbox" data-tlow="' + i + '"' + (t.lower ? ' checked' : '') + ' aria-label="Lower is better"></td>' +
+            '<td>' + (t.key ? '' : '<button type="button" class="link-btn neg" data-tdel="' + i + '" aria-label="Remove">×</button>') + '</td></tr>';
+        }).join('') + '</tbody></table><button type="button" class="btn btn-ghost btn-sm" id="tgAdd" style="margin-top:8px">+ Add target</button>';
+      Array.prototype.forEach.call(body.querySelectorAll('[data-tl]'), function (x) { x.oninput = function () { info.targets[Number(x.getAttribute('data-tl'))].label = x.value; markDirty(); }; });
+      Array.prototype.forEach.call(body.querySelectorAll('[data-tt]'), function (x) {
+        x.oninput = function () { x.value = x.value.replace(/[^0-9.]/g, ''); info.targets[Number(x.getAttribute('data-tt'))].target = x.value === '' ? '' : Number(x.value); markDirty(); };
+      });
+      Array.prototype.forEach.call(body.querySelectorAll('[data-tlow]'), function (x) { x.onchange = function () { info.targets[Number(x.getAttribute('data-tlow'))].lower = x.checked; markDirty(); }; });
+      Array.prototype.forEach.call(body.querySelectorAll('[data-tdel]'), function (x) { x.onclick = function () { info.targets.splice(Number(x.getAttribute('data-tdel')), 1); markDirty(); drawTargets(); }; });
+      document.getElementById('tgAdd').onclick = function () {
+        info.targets.push({ id: 't' + Date.now().toString(36), key: '', label: '', target: '', lower: false });
+        drawTargets();
+        var ins = body.querySelectorAll('[data-tl]'); if (ins.length) ins[ins.length - 1].focus();
+      };
+    }
+    drawTargets();
     var fi = document.getElementById('iFocus');
     function addFocus() {
       var v = fi.value.trim();
@@ -632,6 +665,141 @@
     document.getElementById('infoForm').onsubmit = function (e) { e.preventDefault(); saver.now(); };
     Array.prototype.forEach.call(body.querySelectorAll('select,input[type="date"]'), function (x) { x.addEventListener('change', markDirty); });
     leaveGuard(saver.leaving, saver.unsaved);
+  }
+
+  /* targets: three fixed ones, then the event's own (always numbers) */
+  var FIXED_TARGETS = [
+    { id: 'units', key: 'units', label: 'Total quantity sold' },
+    { id: 'activated', key: 'activated', label: 'Total people activated' },
+    { id: 'margin', key: 'margin', label: 'Gross profit margin %' }
+  ];
+  var TARGET_HINT = { units: 'Units sold (all products)', activated: 'Customers activated (demo counter)', margin: 'Net profit as % of sales, after all costs' };
+  function targetRows(info) {
+    var have = (info && info.targets) || [];
+    var rows = FIXED_TARGETS.map(function (f) {
+      var t = have.filter(function (x) { return x.key === f.key; })[0] || {};
+      return { id: f.id, key: f.key, label: f.label, target: t.target === undefined ? '' : t.target, lower: !!t.lower };
+    });
+    var own = have.filter(function (x) { return !x.key; });
+    rows = rows.concat(own.map(function (t) { return { id: t.id || 't' + Math.random().toString(36).slice(2, 8), key: '', label: t.label || '', target: t.target === undefined ? '' : t.target, lower: !!t.lower }; }));
+    if (!own.length) rows.push({ id: 't' + Date.now().toString(36), key: '', label: '', target: '', lower: false });
+    return rows;
+  }
+  function achievement(t, actual) {
+    var target = Number(t.target);
+    if (t.target === '' || t.target == null || actual === '' || actual == null || isNaN(Number(actual))) return null;
+    actual = Number(actual);
+    if (t.lower) return actual === 0 ? 100 : target / actual * 100;
+    return target ? actual / target * 100 : null;
+  }
+
+  /* ---------------- learnings: notes by topic, targets vs actual, event score */
+  function viewLearnings(body, ev) {
+    if (!state.pnl || state.pnl.id !== ev.id) {
+      body.innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading results…</div></div>';
+      api('pnl', { id: ev.id, writeSheet: false }).then(function (res) {
+        state.pnl = { id: ev.id, data: res.pnl };
+        if (document.getElementById('tabBody') === body) viewLearnings(body, ev);
+      }).catch(function (err) { body.innerHTML = '<div class="card empty"><h2>Couldn\'t load results</h2><p class="muted">' + esc(err.message) + '</p></div>'; });
+      return;
+    }
+    var L = JSON.parse(JSON.stringify(ev.learnings || {}));
+    L.actuals = L.actuals || {};
+    var d = state.pnl.data.dashboard, lines = state.pnl.data.lines;
+    var auto = { units: d.units, activated: d.customersActivated || 0, margin: lines.netPct };
+    var rows = targetRows(ev.info || {}).filter(function (t) { return t.key || t.label || t.target !== ''; });
+    var topics = [['staffing', 'Staffing'], ['location', 'Location'], ['setup', 'Setup'], ['differently', 'Things we\'ll do differently next time']];
+    body.innerHTML =
+      '<form class="info-form" id="lrnForm">' +
+      '<section class="card card-pad"><h3>Targets vs actual</h3><div class="table-wrap"><table class="tbl tg-tbl"><thead><tr><th>Objective</th><th class="num">Target</th><th class="num">Actual</th><th class="num">Achievement</th></tr></thead><tbody id="tgBody"></tbody>' +
+      '<tfoot><tr class="tg-score"><td colspan="3">Event score <span class="pref">average of the achievements</span></td><td class="num" id="tgScore"></td></tr></tfoot></table></div>' +
+      '<p class="small muted" style="margin-bottom:0">Targets are set in <a href="#/event/' + encodeURIComponent(ev.id) + '/info">Info</a>. The first three actuals come from sales, the demo counter and the P&L; type the others.</p></section>' +
+      topics.map(function (t) {
+        return '<section class="card card-pad"><h3>' + esc(t[1]) + '</h3><textarea class="input" data-lrn="' + t[0] + '" rows="4" placeholder="What worked, what didn\'t…">' + esc(L[t[0]] || '') + '</textarea></section>';
+      }).join('') +
+      '<div class="info-save"><span class="small muted">Changes save by themselves.</span><span class="autosave ok" id="lrnState">Saved ✓</span></div></form>';
+    var saver = autosaver(document.getElementById('lrnState'), function () {
+      Array.prototype.forEach.call(body.querySelectorAll('[data-lrn]'), function (x) { L[x.getAttribute('data-lrn')] = x.value; });
+      ev.learnings = JSON.parse(JSON.stringify(L));
+      return api('saveLearnings', { id: ev.id, learnings: L });
+    });
+    function fmt(t, v) { return v === '' || v == null ? '–' : t.key === 'margin' ? (Math.round(v * 10) / 10) + '%' : num(Math.round(v * 100) / 100); }
+    function drawRows() {
+      var scores = [];
+      document.getElementById('tgBody').innerHTML = rows.length ? rows.map(function (t) {
+        var actual = t.key ? auto[t.key] : L.actuals[t.id];
+        var a = achievement(t, actual);
+        if (a != null) scores.push(a);
+        return '<tr><td>' + esc(t.label || '(no name)') + (t.lower ? ' <span class="pref">lower is better</span>' : '') + '</td><td class="num">' + fmt(t, t.target) + '</td>' +
+          '<td class="num">' + (t.key ? '<b>' + fmt(t, actual) + '</b>' : '<input class="input tg-num" data-act="' + esc(t.id) + '" inputmode="decimal" placeholder="–" value="' + esc(actual == null ? '' : actual) + '">') + '</td>' +
+          '<td class="num tg-ach ' + (a == null ? '' : a >= 100 ? 'good-t' : a >= 75 ? 'warn-text' : 'neg') + '">' + (a == null ? '–' : Math.round(a) + '%') + '</td></tr>';
+      }).join('') : '<tr><td colspan="4" class="muted">No targets yet. Add them in Info.</td></tr>';
+      var sc = scores.length ? scores.reduce(function (x, y) { return x + y; }, 0) / scores.length : null;
+      var se = document.getElementById('tgScore');
+      se.textContent = sc == null ? '–' : Math.round(sc) + '%';
+      se.className = 'num ' + (sc == null ? '' : sc >= 100 ? 'good-t' : sc >= 75 ? 'warn-text' : 'neg');
+      Array.prototype.forEach.call(body.querySelectorAll('[data-act]'), function (x) {
+        x.oninput = function () {
+          x.value = x.value.replace(/[^0-9.]/g, '');
+          var id = x.getAttribute('data-act');
+          if (x.value === '') delete L.actuals[id]; else L.actuals[id] = Number(x.value);
+          saver.touch();
+          var keep = x.selectionStart; drawRows();
+          var again = body.querySelector('[data-act="' + id + '"]'); if (again) { again.focus(); try { again.setSelectionRange(keep, keep); } catch (e) { /* number-like */ } }
+        };
+      });
+    }
+    drawRows();
+    Array.prototype.forEach.call(body.querySelectorAll('[data-lrn]'), function (x) { x.addEventListener('input', function () { saver.touch(); }); });
+    document.getElementById('lrnForm').onsubmit = function (e) { e.preventDefault(); saver.now(); };
+    leaveGuard(saver.leaving, saver.unsaved);
+  }
+
+  /* ---------------- packing list / return list PDFs for the logistics team */
+  function stockListPdf(ev, kind) {
+    var w = window.open('', '_blank');
+    if (!w) { toast('Allow pop-ups for this site to make the PDF.', true); return; }
+    w.document.write('<!doctype html><title>Preparing…</title><p style="font-family:sans-serif;padding:24px">Preparing the list…</p>');
+    api('getInventory', { id: ev.id }).then(function (res) {
+      var inv = res.inventory;
+      state.inv = { id: ev.id, data: inv };
+      var ret = kind === 'return';
+      var own = inv.items.filter(function (i) { return !i.consignment; });
+      var ext = inv.items.filter(function (i) { return i.consignment; });
+      var qOf = function (i) { return ret ? i.live : i.opening; };
+      var byName = function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; };
+      var products = own.filter(function (i) { return qOf(i) > 0; }).sort(byName);
+      var demos = inv.items.filter(function (i) { return i.demo > 0; }).sort(byName);
+      var mats = (inv.materials || []).map(function (m) { return { name: m.description, qty: m.qty, notes: m.notes }; })
+        .concat(ext.filter(function (i) { return qOf(i) > 0; }).sort(byName).map(function (i) { return { name: i.name, qty: qOf(i), notes: '' }; }));
+      var cols = products.length <= 70 ? 2 : 3;
+      var total = products.reduce(function (a, i) { return a + qOf(i); }, 0);
+      var title = ret ? 'Return list' : 'Packing list';
+      var logo = location.origin + location.pathname.replace(/index\.html$/, '') + 'assets/logo-dark.png';
+      var list = function (arr, q) {
+        return arr.map(function (i) { return '<div class="ln"><span class="nm">' + esc(i.name) + '</span><span class="q">' + num(q(i)) + '</span></div>'; }).join('');
+      };
+      var html = '<!doctype html><html><head><meta charset="utf-8"><title>' + esc(ev.startDate.replace(/-/g, '') + ' - ' + ev.name + ' - ' + title) + '</title><style>' +
+        '@page{size:A4;margin:6mm}*{box-sizing:border-box}body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#231F20;margin:0;font-size:9.5pt}' +
+        '.hd{display:flex;align-items:center;gap:10px;border-bottom:2px solid #EB5C24;padding-bottom:4px;margin-bottom:6px}.hd img{height:22px}.hd b{font-size:12pt}.hd .s{color:#666;margin-left:auto;text-align:right;font-size:8.5pt}' +
+        'h2{font-size:10pt;margin:8px 0 3px;color:#EB5C24;text-transform:uppercase;letter-spacing:.04em}' +
+        'table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:2px 4px;text-align:left;vertical-align:top}th{font-size:8pt;color:#666;font-weight:600}.n{text-align:right;width:44px;font-weight:700}' +
+        '.cols{column-gap:14px;column-rule:1px solid #e3ddd5}.ln{display:flex;gap:6px;border-bottom:1px solid #eee;padding:1.6px 0;break-inside:avoid}.nm{flex:1}.q{font-weight:700;min-width:22px;text-align:right}' +
+        '.tot{color:#666;font-size:8.5pt;margin-top:4px}button{margin-top:10px;padding:8px 14px}@media print{button{display:none}}</style></head><body>' +
+        '<div class="hd"><img src="' + logo + '" alt="SHN"><b>' + title + ' · ' + esc(ev.name) + '</b><span class="s">' + esc(fmtRange(ev.startDate, ev.endDate)) + (ev.venue ? ' · ' + esc(ev.venue) : '') +
+        '<br>' + (ret ? 'Stock left on ' : 'Made ') + esc(new Date().toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })) + '</span></div>' +
+        '<h2>Tools &amp; materials</h2>' + (mats.length ? '<table><tr><th>Description</th><th class="n">Qty</th><th>Notes</th></tr>' + mats.map(function (m) {
+          return '<tr><td>' + esc(m.name) + '</td><td class="n">' + num(m.qty) + '</td><td>' + esc(m.notes) + '</td></tr>';
+        }).join('') + '</table>' : '<div class="tot">None listed.</div>') +
+        '<h2>Demo units</h2>' + (demos.length ? '<div class="cols" style="columns:3">' + list(demos, function (i) { return i.demo; }) + '</div>' : '<div class="tot">None.</div>') +
+        '<h2>Products</h2>' + (products.length ? '<div class="cols" style="columns:' + cols + '">' + list(products, qOf) + '</div>' : '<div class="tot">None.</div>') +
+        '<div class="tot">' + products.length + ' products · ' + num(total) + ' units' + (ret ? ' left (sold-out products not listed)' : '') + '</div>' +
+        '<button onclick="print()">Print / save as PDF</button></body></html>';
+      w.document.open(); w.document.write(html); w.document.close();
+      w.onload = function () { setTimeout(function () { try { w.print(); } catch (e) { /* the button is there */ } }, 300); };
+    }).catch(function (err) {
+      w.document.body.innerHTML = '<p style="font-family:sans-serif;padding:24px">Couldn\'t make the list: ' + esc(err.message) + '</p>';
+    });
   }
 
   /* saves a moment after the last change; "Saving…" / "Saved ✓" / "Not saved" in the status */
@@ -865,7 +1033,7 @@
         '<div class="card empty"><h2>No products yet</h2>' +
         '<p class="muted">In the event\'s Google Sheet, open the <b>Listing</b> tab. Pick or paste product names in the <b>Product</b> column, ' +
         'then type the <b>Opening Qty</b> and <b>Demo Qty</b>. Ref Code, category and price fill in by themselves.</p>' +
-        '<p class="muted">External products go in columns I–R of the same tab.</p>' +
+        '<p class="muted">Tools and materials go in columns I–K of the same tab, external products in columns M–V.</p>' +
         '<a class="btn btn-primary" href="' + esc(ev.sheetUrl) + '" target="_blank" rel="noopener">Open Google Sheet</a> ' +
         '<button class="btn btn-ghost" id="invRefresh">Refresh</button></div>';
       document.getElementById('invRefresh').onclick = function () { state.inv = null; viewInventory(body, ev); };
@@ -888,6 +1056,8 @@
         return '<div class="card stat"><div class="k">' + s[0] + '</div><div class="v">' + s[1] + '</div></div>';
       }).join('') + '</div>' +
       warningsHtml(data.warnings) +
+      '<div class="toolbar" style="margin-top:0"><span class="small muted">For the logistics team</span><div class="tb-actions">' +
+      '<button class="btn btn-ghost" id="packPdf">Packing list (PDF)</button><button class="btn btn-ghost" id="returnPdf">Return list (PDF)</button></div></div>' +
       '<div id="refillBox"></div>' +
       '<div class="toolbar">' +
       '<input class="input search" id="invSearch" type="search" placeholder="Search product, ref code or barcode" value="' + esc(state.invQuery) + '">' +
@@ -902,6 +1072,8 @@
     var search = document.getElementById('invSearch');
     search.oninput = function () { state.invQuery = search.value; drawInvList(items); };
     document.getElementById('invCat').onchange = function () { state.invCat = this.value; drawInvList(items); };
+    document.getElementById('packPdf').onclick = function () { stockListPdf(ev, 'packing'); };
+    document.getElementById('returnPdf').onclick = function () { stockListPdf(ev, 'return'); };
     drawInvList(items);
     drawRefills(ev);
   }
