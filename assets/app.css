@@ -764,3 +764,4 @@ body.pos-mode .topbar-event { max-width: none; flex: 1; margin-left: 0; white-sp
 .qr-btns { display: grid; grid-template-columns: 1fr 1fr; }
 .qr-btns .whish-btn { font-size: 13px; padding: 5px 8px 5px 5px; gap: 6px; justify-content: flex-start; line-height: 1.15; text-align: left; }
 .qr-btns .whish-btn img, .qr-btns .card-ico { width: 28px; height: 28px; flex: 0 0 auto; }
+.qr-btns .whish-btn.picked { border: 2px solid var(--accent); background: #fff4ee; }

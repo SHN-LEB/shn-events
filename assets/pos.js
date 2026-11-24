@@ -1143,8 +1143,9 @@
       function () { return pos.data.lbpStep || 5000; }, function (u, l) { pay.changeUsd = u; pay.changeLbp = l; clearErr(); });
     keepAboveKeyboard(root);
     $('#payConfirm').onclick = function () { confirmSale(pos); };
-    if ($('#whishBtn')) $('#whishBtn').onclick = function () { showWhish(pos, calc(pos).online, 'whish'); };
-    if ($('#cardBtn')) $('#cardBtn').onclick = function () { showWhish(pos, calc(pos).online, 'card'); };
+    // the two QR buttons also say how the customer paid online (saved in the sheet)
+    if ($('#whishBtn')) $('#whishBtn').onclick = function () { pos.pay.channel = 'Whish'; update(pos); showWhish(pos, calc(pos).online, 'whish'); };
+    if ($('#cardBtn')) $('#cardBtn').onclick = function () { pos.pay.channel = 'Card'; update(pos); showWhish(pos, calc(pos).online, 'card'); };
     wireErrorSlot(pos, root);
     update(pos);
   }
@@ -1281,6 +1282,8 @@
     var cash = pay.method !== 'Online';
     $('#onlineField').hidden = pay.method !== 'Split';
     if ($('#qrBtns')) $('#qrBtns').hidden = pay.method === 'Cash';
+    if ($('#whishBtn')) $('#whishBtn').classList.toggle('picked', pay.channel === 'Whish');
+    if ($('#cardBtn')) $('#cardBtn').classList.toggle('picked', pay.channel === 'Card');
     Array.prototype.forEach.call(root.querySelectorAll('.cashf'), function (f) {
       f.classList.toggle('off', !cash);
       f.querySelector('input').disabled = !cash;
@@ -1303,8 +1306,9 @@
     var err = '';
     var needsPin = t.maxDisc > pos.data.maxDiscountPct;
     if (pay.method === 'Split' && !(c.online > 0 && c.online < t.total)) err = 'Enter the part paid online (less than the total).';
+    else if (pay.method !== 'Cash' && !pay.channel && (pos.data.whishLink || cardLink())) err = 'Tap Whish or Card to say how the customer paid online.';
     var sale = {
-      id: newSaleId(), seller: pos.seller, method: pay.method, discountPct: t.disc, roundTotal: pos.roundOrder !== false, note: pos.note.trim(),
+      id: newSaleId(), seller: pos.seller, method: pay.method, channel: pay.method === 'Cash' ? '' : (pay.channel || ''), discountPct: t.disc, roundTotal: pos.roundOrder !== false, note: pos.note.trim(),
       lines: pos.cart.map(function (l) {
         return t.disc > 0 || !l.disc ? { ref: l.ref, qty: l.qty } : { ref: l.ref, qty: l.qty, discountPct: l.disc, roundDown: l.round !== false, note: l.note };
       }),
@@ -2212,7 +2216,7 @@
     function row(s, extra) {
       var isReturn = !!s.returnOf || s.kind === 'return';
       var head = isReturn
-        ? '<b>Return · ' + S.money(s.total) + '</b> · ' + (s.method === 'Online' ? 'refunded online' : 'cash back' +
+        ? '<b>Return · ' + S.money(s.total) + '</b> · ' + (/^Online/.test(s.method || '') ? 'refunded online' : 'cash back' +
           (s.changeUsd || s.changeLbp ? ' ' + [s.changeUsd ? '$' + S.num(s.changeUsd) : '', s.changeLbp ? lbp(s.changeLbp) : ''].filter(Boolean).join(' + ') : ''))
         : '<b>' + S.money(s.total) + '</b> · ' + S.esc(s.method || '') + ' · ' + S.esc(s.seller || '');
       var units = 0, back = 0;

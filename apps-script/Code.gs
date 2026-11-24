@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -1071,6 +1071,18 @@ function when_(clientTime) {
 
 function round2_(n) { return Math.round(n * 100) / 100; }
 
+/* Sales column M: "Cash", "Online - Whish", "Online - Card", "Cash + Whish", "Cash + Card" (plain "Online"/"Split" when not given) */
+function methodLabel_(method, channel) {
+  const ch = channel === 'Whish' || channel === 'Card' ? channel : '';
+  if (method === 'Online') return ch ? 'Online - ' + ch : 'Online';
+  if (method === 'Split') return ch ? 'Cash + ' + ch : 'Split';
+  return method;
+}
+function channelOf_(label) {
+  const t = String(label || '');
+  return /Whish/i.test(t) ? 'Whish' : /Card/i.test(t) ? 'Card' : '';
+}
+
 function activeStaffNames_(ss) {
   return readStaff_(ss).filter(function (p) { return p.active; }).map(function (p) { return p.name; });
 }
@@ -1309,7 +1321,7 @@ function recordSale_(id, sale) {
       const first = i === 0;
       const lineNote = [first ? note : '', l.note].filter(Boolean).join(' | ');
       return [saleId, i + 1, date, time, seller, l.ref, it.name, it.category, l.qty, it.price, l.pct, l.total,
-        method, first ? online : '', first ? recvUsd : '', first ? recvLbp : '', first ? changeUsd : '', first ? changeLbp : '',
+        methodLabel_(method, sale.channel), first ? online : '', first ? recvUsd : '', first ? recvLbp : '', first ? changeUsd : '', first ? changeLbp : '',
         first ? rounding : '', round2_(l.total * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt, lineNote];
     });
     const start = salesSheet.getLastRow() + 1;
@@ -1387,7 +1399,7 @@ function recordReturn_(id, ret) {
     const out = lines.map(function (l, i) {
       const o = l.o, first = i === 0;
       return [retId, i + 1, date, time, String(o[4]), String(o[5]), String(o[6]), String(o[7]), -l.qty, Number(o[9]) || 0, Number(o[10]) || 0, -l.total,
-        method, first ? (method === 'Online' ? -due : 0) : '', first ? 0 : '', first ? 0 : '', first ? refundUsd : '', first ? refundLbp : '',
+        method === 'Online' ? methodLabel_('Online', channelOf_(lines[0].o[12])) : method, first ? (method === 'Online' ? -due : 0) : '', first ? 0 : '', first ? 0 : '', first ? refundUsd : '', first ? refundLbp : '',
         first ? rounding : '', round2_(-l.total * VAT_PCT / (100 + VAT_PCT)), '', '', loggedAt,
         first ? [String(ret.note || '').slice(0, 200), retApproved ? 'Approved with manager PIN' : ''].filter(Boolean).join(' | ') : '', saleId];
     });
@@ -2099,12 +2111,16 @@ function pnl_(id, writeSheet) {
   const sales = ss.getSheetByName('Sales').getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim() && !String(r[20] || '').trim(); });
 
   let total = 0, shn = 0, ext = 0, vat = 0, online = 0, units = 0, returns = 0, discounts = 0;
+  const byChannel = { Whish: 0, Card: 0, other: 0 };
   const byDay = {}, byCat = {}, byProduct = {}, bySeller = {}, byPartner = {}, tickets = {};
   sales.forEach(function (r) {
     const ref = String(r[5]), q = Number(r[8]) || 0, t = Number(r[11]) || 0, it = items[ref];
     const isExt = it ? it.consignment : /^C\d+$/.test(ref);
     total += t; units += q; vat += Number(r[19]) || 0;
-    if (Number(r[1]) === 1) online += Number(r[13]) || 0;
+    if (Number(r[1]) === 1) {
+      online += Number(r[13]) || 0;
+      byChannel[channelOf_(r[12]) || 'other'] += Number(r[13]) || 0;
+    }
     if (t < 0) returns += -t;
     discounts += Math.max(0, (Number(r[9]) || 0) * q - t) * (q > 0 ? 1 : 0);
     if (isExt) {
@@ -2160,6 +2176,7 @@ function pnl_(id, writeSheet) {
     dashboard: {
       sales: total, units: units, tickets: nTickets, avgTicket: nTickets ? round2_(total / nTickets) : 0,
       online: round2_(online), cash: round2_(total - online), discounts: round2_(discounts),
+      onlineWhish: round2_(byChannel.Whish), onlineCard: round2_(byChannel.Card), onlineOther: round2_(byChannel.other),
       days: days, avgPerDay: avg(days, function (d) { return d.sales; }), avgUnitsPerDay: avg(days, function (d) { return d.units; }),
       weekday: { days: days.filter(function (d) { return !d.weekend; }).length, avgSales: avg(days.filter(function (d) { return !d.weekend; }), function (d) { return d.sales; }) },
       weekend: { days: days.filter(function (d) { return d.weekend; }).length, avgSales: avg(days.filter(function (d) { return d.weekend; }), function (d) { return d.sales; }) },

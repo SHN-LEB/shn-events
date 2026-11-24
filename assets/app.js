@@ -1414,7 +1414,8 @@
       html = refresh + '<div class="stats">' +
         stat('Sales', money(d.sales)) + stat('Units sold', num(d.units)) + stat('Tickets', num(d.tickets) + '<div class="sub">sales made</div>') +
         stat('Average ticket', money(d.avgTicket)) + stat('Per day', money(d.avgPerDay) + '<div class="sub">' + d.avgUnitsPerDay + ' units</div>') +
-        stat('Cash / online', money(d.cash) + '<div class="sub">' + money(d.online) + ' online</div>') +
+        stat('Cash / online', money(d.cash) + '<div class="sub">' + money(d.online) + ' online' +
+          (d.onlineWhish || d.onlineCard ? ' · Whish ' + money(d.onlineWhish || 0) + ' · Card ' + money(d.onlineCard || 0) : '') + '</div>') +
         (d.demoPlays || d.customersActivated ? stat('Demo plays', num(d.demoPlays)) + stat('Customers activated', num(d.customersActivated)) : '') + '</div>' +
         '<div class="dash-grid">' +
         '<div class="card card-pad"><h3>Sales per day' + (d.targetSales ? ' <span class="small muted">(target ' + money(d.targetSales) + ')</span>' : '') + '</h3>' +
