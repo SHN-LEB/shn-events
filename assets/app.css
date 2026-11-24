@@ -726,3 +726,25 @@ body.pos-mode .topbar-event { max-width: none; flex: 1; margin-left: 0; white-sp
 .scan-pop .sp-cancel { display: block; margin: 10px auto 0; }
 .scan-pop.bad .sp-name { color: var(--bad); }
 .scan-view { position: relative; }
+
+/* v1.10 */
+.scan-pop .sp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-weight: 700; }
+.scan-pop .sp-row input { width: 64px; text-align: center; font-size: 22px; font-weight: 800; border: 1px solid var(--line); border-radius: 10px; height: 52px; }
+
+.hr-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.hr-tools .btn.active { border-color: var(--accent); color: var(--accent); }
+.hr-fill { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; background: #faf7f2; border-radius: 10px; padding: 8px 10px; }
+.hr-fill span { font-size: 13px; color: var(--muted); min-width: 64px; }
+.hr-in { width: 150px; }
+.hr-tbl tr.hr-closed td { color: var(--muted); background: #faf8f5; }
+.be-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.be-pair .be-card { margin: 0; }
+.be-pair .be-big b { font-size: 34px; }
+.pe-tbl .input { min-width: 0; }
+.pe-tbl select.input { min-width: 170px; }
+.pe-in { width: 80px; text-align: right; }
+.be-past { margin-top: 4px; }
+.pe-tbl td:first-child { min-width: 240px; }
+.pe-ev { display: grid; gap: 4px; width: 240px; }
+.pe-ev .input { width: 100%; }
+.pe-tbl td { white-space: normal; vertical-align: top; }

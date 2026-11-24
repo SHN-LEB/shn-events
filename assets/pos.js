@@ -739,6 +739,7 @@
       if (code === last && now - lastAt < 2000) return;
       last = code; lastAt = now;
       if (opts.popup) { paused = true; showPop(code); return; }
+      if (opts.count) { paused = true; showCountPop(code); return; }
       var r = onCode ? onCode(code) || { ok: true } : { ok: true };
       msg.textContent = r.text || code;
       msg.className = 'scan-msg ' + (r.ok ? 'good' : 'bad');
@@ -746,6 +747,55 @@
       if (r.ok && !opts.continuous) stop();
     }
     wrap.querySelector('#scanDone').onclick = stop;
+    /* stock count: Sellable and Demo for the scanned game, then OK (back to the list) or Scan next */
+    function showCountPop(code) {
+      var hit = byBarcode(pos, code);
+      var view = wrap.querySelector('.scan-view');
+      var pop = document.createElement('div');
+      pop.className = 'scan-pop' + (hit ? '' : ' bad');
+      if (navigator.vibrate) navigator.vibrate(hit ? 60 : [40, 60, 40]);
+      function resume() { pop.remove(); paused = false; lastAt = Date.now(); msg.textContent = 'Point the camera at the barcode.'; msg.className = 'scan-msg'; }
+      if (!hit) {
+        pop.innerHTML = '<div class="sp-name">No game with this barcode</div><div class="sp-sub">' + S.esc(code) + '</div>' +
+          '<div class="sp-btns"><button class="btn btn-ghost" data-sp="close">Close</button><button class="btn btn-primary" data-sp="again">Try again</button></div>';
+        view.appendChild(pop);
+        pop.querySelector('[data-sp="again"]').onclick = resume;
+        pop.querySelector('[data-sp="close"]').onclick = stop;
+        return;
+      }
+      var cur = opts.count.get(hit.ref) || {};
+      var row = function (k, label) {
+        return '<div class="sp-row"><span>' + label + '</span><div class="qty big-qty"><button type="button" data-dec="' + k + '" aria-label="One less">−</button>' +
+          '<input data-v="' + k + '" inputmode="numeric" placeholder="–" value="' + S.esc(cur[k] == null ? '' : cur[k]) + '" aria-label="' + label + '">' +
+          '<button type="button" data-inc="' + k + '" aria-label="One more">+</button></div></div>';
+      };
+      pop.innerHTML = '<div class="sp-name">' + S.esc(hit.name) + '</div><div class="sp-sub">Count what is on the stand</div>' +
+        row('s', 'Sellable') + (hit.demo ? row('d', 'Demo') : '') +
+        '<div class="sp-btns"><button class="btn btn-ghost" data-sp="another">Scan next</button><button class="btn btn-accent" data-sp="ok">OK</button></div>' +
+        '<button class="link-btn sp-cancel" data-sp="cancel">Cancel</button>';
+      view.appendChild(pop);
+      var inp = function (k) { return pop.querySelector('[data-v="' + k + '"]'); };
+      Array.prototype.forEach.call(pop.querySelectorAll('[data-v]'), function (x) { x.oninput = function () { x.value = x.value.replace(/[^0-9]/g, ''); }; });
+      Array.prototype.forEach.call(pop.querySelectorAll('[data-inc],[data-dec]'), function (b) {
+        b.onclick = function () {
+          var k = b.getAttribute('data-inc') || b.getAttribute('data-dec'), x = inp(k);
+          var v = x.value === '' ? 0 : Number(x.value);
+          x.value = Math.max(0, v + (b.getAttribute('data-inc') ? 1 : -1));
+        };
+      });
+      function saveIt() {
+        var v = { s: inp('s').value };
+        if (inp('d')) v.d = inp('d').value;
+        opts.count.set(hit.ref, v);
+      }
+      pop.querySelector('[data-sp="ok"]').onclick = function () { saveIt(); stop(); opts.count.done(hit.ref); };
+      pop.querySelector('[data-sp="another"]').onclick = function () {
+        saveIt(); resume();
+        msg.textContent = 'Saved ' + hit.name + '. Scan the next game.'; msg.className = 'scan-msg good';
+      };
+      pop.querySelector('[data-sp="cancel"]').onclick = resume;
+    }
+
     /* POS: what was scanned, how many, then OK (back to the POS) or Scan another game */
     function showPop(code) {
       var hit = byBarcode(pos, code);
@@ -1454,8 +1504,9 @@
     return { text: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + d.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ', ' + hm, old: true };
   }
 
-  function openStaff(pos, after) {
-    var m = modal('<div id="staffBox"></div>');
+  function openStaff(pos, after, under) {
+    // "under": a window this one opens on top of (it comes back, untouched, when this one closes)
+    var m = modal('<div id="staffBox"></div>', under ? function () { under.hidden = false; under.id = 'posModal'; } : null);
     var box = m.el.querySelector('#staffBox');
     function draw() {
       staffPanel(pos, box, function (name, dir) {
@@ -1499,6 +1550,7 @@
       if (x.type === 'sale') { usd += (x.sale.recvUsd || 0) - (x.sale.changeUsd || 0); lbp += (x.sale.recvLbp || 0) - (x.sale.changeLbp || 0); }
       if (x.type === 'return') { usd -= x.ret.refundUsd || 0; lbp -= x.ret.refundLbp || 0; }
       if (x.type === 'cash' && x.cash.kind === 'handover') { usd -= x.cash.usd || 0; lbp -= x.cash.lbp || 0; }
+      if (x.type === 'cash' && x.cash.kind === 'cashin') { usd += x.cash.usd || 0; lbp += x.cash.lbp || 0; }
     });
     return { usd: r2(usd), lbp: Math.round(lbp) };
   }
@@ -1564,7 +1616,11 @@
       };
     });
     var c = root.querySelector('[data-clockin]');
-    if (c) c.onclick = function () { openStaff(pos, function (name, dir) { if (dir === 'in') onPick(name); onReRender(); }); };
+    if (c) c.onclick = function () {
+      var under = root.closest ? root.closest('#posModal') : null;
+      if (under) { under.removeAttribute('id'); under.hidden = true; }
+      openStaff(pos, function (name, dir) { if (dir === 'in') onPick(name); onReRender(); }, under);
+    };
   }
 
   function openDayDialog(pos) {
@@ -1711,21 +1767,32 @@
     Array.prototype.forEach.call(root.querySelectorAll('tbody tr'), mark);
     keepAboveKeyboard(root);
     root.querySelector('#countScan').onclick = function () {
-      openScanner(pos, { title: 'Scan a product to count it' }, function (code) {
-        var hit = byBarcode(pos, code);
-        if (!hit) return { ok: false, text: 'No product with barcode ' + code };
-        setTimeout(function () {
-          var tr = root.querySelector('tr[data-ref="' + (window.CSS && CSS.escape ? CSS.escape(hit.ref) : hit.ref) + '"]');
-          if (!tr) return;
-          tr.classList.add('flash');
-          var inp = tr.querySelector('.ct-in');
-          tr.scrollIntoView({ block: 'center' });
-          if (inp) { inp.focus(); inp.select(); }
-          setTimeout(function () { tr.classList.remove('flash'); }, 1500);
-        }, 50);
-        return { ok: true, text: hit.name };
-      });
+      openScanner(pos, { title: 'Scan to count', count: {
+        get: function (ref) { return st.values[ref] || {}; },
+        set: function (ref, v) {
+          st.values[ref] = st.values[ref] || {};
+          st.values[ref].s = v.s;
+          if (v.d !== undefined) st.values[ref].d = v.d;
+          keep();
+          var tr = row(ref);
+          if (tr) {
+            var si = tr.querySelector('[data-k="s"]'), di = tr.querySelector('[data-k="d"]');
+            if (si) si.value = v.s; if (di && v.d !== undefined) di.value = v.d;
+            mark(tr);
+          }
+        },
+        done: function (ref) {
+          setTimeout(function () {
+            var tr = row(ref);
+            if (!tr) return;
+            tr.scrollIntoView({ block: 'center' });
+            tr.classList.add('flash');
+            setTimeout(function () { tr.classList.remove('flash'); }, 1500);
+          }, 60);
+        }
+      } }, null);
     };
+    function row(ref) { return root.querySelector('tr[data-ref="' + (window.CSS && CSS.escape ? CSS.escape(ref) : ref) + '"]'); }
     root.querySelector('#countSave').onclick = function () {
       var lines = Object.keys(st.values).map(function (ref) {
         var v = st.values[ref];
@@ -1820,27 +1887,54 @@
     };
   }
 
+  /* handover: cash taken out of the drawer (to the manager) or added to it (from the manager) */
   function openHandover(pos) {
+    var mode = 'out', who = '';
     var m = modal(
       '<div class="pay-head"><h2>Cash handover</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<div class="seg seg2" id="hoMode"><button type="button" class="active" data-mode="out">Taking money out</button><button type="button" data-mode="in">Adding money</button></div>' +
+      '<p class="small muted" id="hoHint" style="margin:8px 0 10px"></p>' +
       '<div class="two"><div class="field"><label for="hoUsd">Amount USD</label><input class="input money-in" id="hoUsd" inputmode="decimal" placeholder="0"></div>' +
       '<div class="field"><label for="hoLbp">Amount LBP</label><input class="input money-in" id="hoLbp" inputmode="numeric" placeholder="0"></div></div>' +
-      '<div class="field"><label for="hoTo">Collected by</label><input class="input" id="hoTo" placeholder="Name of the person taking the cash"></div>' +
+      '<div class="field"><label for="hoTo" id="hoToLabel">Collected by</label><input class="input" id="hoTo" placeholder="Name of the person taking the cash"></div>' +
+      '<div id="hoWhoBox" hidden><h3 class="rs-title">Received by</h3><div id="hoWho">' + namePicker(pos, '', 'hoNames') + '</div></div>' +
       '<div class="field"><label for="hoNote">Note (optional)</label><input class="input" id="hoNote"></div>' +
       '<div id="hoErr"></div><button class="btn btn-accent btn-big btn-block" id="hoSave">Submit handover</button>');
     var $ = function (sel) { return m.el.querySelector(sel); };
     liveCommas($('#hoLbp'), function () {});
+    function wire() { wirePicker(pos, m.el, function (n) { who = n; $('#hoErr').innerHTML = ''; }, function () { $('#hoWho').innerHTML = namePicker(pos, who, 'hoNames'); wire(); }); }
+    wire();
+    function setMode(md) {
+      mode = md;
+      Array.prototype.forEach.call(m.el.querySelectorAll('#hoMode button'), function (b) { b.classList.toggle('active', b.getAttribute('data-mode') === md); });
+      $('#hoHint').textContent = md === 'out' ? 'Cash leaving the drawer, e.g. collected by the manager.' : 'Cash put into the drawer, e.g. extra change brought by the manager.';
+      $('#hoToLabel').textContent = md === 'out' ? 'Collected by' : 'Brought by';
+      $('#hoTo').placeholder = md === 'out' ? 'Name of the person taking the cash' : 'Name of the person bringing the cash';
+      $('#hoWhoBox').hidden = md === 'out';
+      $('#hoSave').textContent = md === 'out' ? 'Submit handover' : 'Add to the drawer';
+      $('#hoErr').innerHTML = '';
+    }
+    Array.prototype.forEach.call(m.el.querySelectorAll('#hoMode button'), function (b) { b.onclick = function () { setMode(b.getAttribute('data-mode')); }; });
+    setMode('out');
     $('#hoSave').onclick = function () {
-      var usd = parseNum($('#hoUsd').value), l = Math.round(parseNum($('#hoLbp').value)), to = $('#hoTo').value.trim();
-      var err = !usd && !l ? 'Enter the amount handed over.' : !to ? 'Who collected the cash?' : '';
+      var usd = parseNum($('#hoUsd').value), l = Math.round(parseNum($('#hoLbp').value)), name = $('#hoTo').value.trim();
+      var err = !usd && !l ? (mode === 'out' ? 'Enter the amount handed over.' : 'Enter the amount added.')
+        : !name ? (mode === 'out' ? 'Who collected the cash?' : 'Who brought the cash?') : mode === 'in' && !who ? 'Pick who received it.' : '';
       if (err) { $('#hoErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
-      var open = openShiftNames(pos);
-      var by = pos.data.staff.filter(function (n) { return open[n]; }).join(', ');
-      var cash = { id: 'H' + newSaleId().slice(1), kind: 'handover', by: by, to: to, usd: usd, lbp: l, note: $('#hoNote').value.trim(), clientTime: new Date().toISOString() };
+      var cash;
+      if (mode === 'out') {
+        var open = openShiftNames(pos);
+        cash = { id: 'H' + newSaleId().slice(1), kind: 'handover', by: pos.data.staff.filter(function (n) { return open[n]; }).join(', '), to: name, usd: usd, lbp: l,
+          note: $('#hoNote').value.trim(), clientTime: new Date().toISOString() };
+      } else {
+        cash = { id: 'I' + newSaleId().slice(1), kind: 'cashin', from: name, by: who, usd: usd, lbp: l, note: $('#hoNote').value.trim(), clientTime: new Date().toISOString() };
+      }
       enqueue(pos, { qid: cash.id, type: 'cash', cash: cash });
       m.close();
-      S.toast('Handover saved: ' + [usd ? S.money(usd) : '', l ? lbp(l) : ''].filter(Boolean).join(' + ') + ' to ' + to + '.');
+      var amt = [usd ? S.money(usd) : '', l ? lbp(l) : ''].filter(Boolean).join(' + ');
+      S.toast(mode === 'out' ? 'Handover saved: ' + amt + ' to ' + name + '.' : 'Added to the drawer: ' + amt + ' from ' + name + '.');
       flush(pos);
+      if (pos.view === 'home') render(pos);
     };
   }
 
@@ -2128,7 +2222,7 @@
     var m = modal(
       '<div class="pay-head"><h2>Recent sales</h2><button class="link-btn" data-close>Close</button></div>' +
       (failed.length ? '<h3 class="rs-title neg">Not saved</h3>' + failed.map(function (x) {
-        var label = { clock: 'Clock ' + x.direction, count: 'Stock count', cash: x.cash && x.cash.kind === 'handover' ? 'Handover' : 'Cash count', day: 'Day ' + (x.day && x.day.action),
+        var label = { clock: 'Clock ' + x.direction, count: 'Stock count', cash: x.cash && x.cash.kind === 'handover' ? 'Handover' : x.cash && x.cash.kind === 'cashin' ? 'Cash added' : 'Cash count', day: 'Day ' + (x.day && x.day.action),
           customer: 'Customer contact', refill: 'Refill request', demo: 'Demo counter' }[x.type];
         return row(label ? { total: 0, method: label, seller: x.name || (x.count && x.count.countedBy) || (x.cash && x.cash.by) || (x.day && x.day.by) || (x.customer && x.customer.name) || (x.refill && x.refill.by) || (x.demo && x.demo.by) || '', lines: [] } : pendingRow(x),
           '<div><div class="small neg">' + S.esc(x.error) + '</div><button class="btn btn-ghost btn-sm" data-discard="' + S.esc(x.qid) + '">Discard</button></div>');

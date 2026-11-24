@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -21,7 +21,8 @@ const LBP_STEP = 5000; // LBP change is rounded to this step
 
 const MASTER_TABS = {
   Events: ['Event ID', 'Name', 'Type', 'Venue', 'Start Date', 'End Date', 'Status', 'Sheet URL', 'Sheet ID', 'Created At',
-    'Info (app)', 'Break-even (app)', 'Copy From', 'Days Sold', 'Avg Units / Day', 'Avg Sales / Day', 'Learnings (app)'],
+    'Info (app)', 'Break-even (app)', 'Copy From', 'Days Sold', 'Avg Units / Day', 'Avg Sales / Day', 'Learnings (app)',
+    'Units Sold', 'Sales (USD)', 'Customers Activated', 'Net Profit %'],
   Settings: ['Setting', 'Value', 'Notes']
 };
 
@@ -359,7 +360,8 @@ function rowToEvent_(r) {
     daysSold: Number(r[13]) || 0,
     avgUnitsPerDay: Number(r[14]) || 0,
     avgSalesPerDay: Number(r[15]) || 0,
-    learnings: parseJson_(r[16], null)
+    learnings: parseJson_(r[16], null),
+    totals: r[17] === '' || r[17] == null ? null : { units: Number(r[17]) || 0, sales: Number(r[18]) || 0, activated: Number(r[19]) || 0, netPct: Number(r[20]) || 0 }
   };
 }
 
@@ -417,7 +419,7 @@ function createEvent_(req, extra) {
     sh.getRange(r, 1, 1, 13).setValues([[id, f.name, f.type, f.venue, f.startDate, f.endDate, 'Draft', '', '', '',
       JSON.stringify(info), extra.breakeven ? JSON.stringify(extra.breakeven) : '', extra.copyFrom || '']]);
     sh.getRange(r, 10).setNumberFormat('yyyy-mm-dd hh:mm').setValue(createdAt);
-    return rowToEvent_(sh.getRange(r, 1, 1, 17).getValues()[0]);
+    return rowToEvent_(sh.getRange(r, 1, 1, 21).getValues()[0]);
   } finally {
     lock.releaseLock();
   }
@@ -460,6 +462,14 @@ const INFO_FIELDS = ['description', 'openingHours', 'mapsLink', 'standLocation',
 function cleanInfo_(info) {
   const out = {};
   INFO_FIELDS.forEach(function (k) { if (info[k] != null && String(info[k]).trim()) out[k] = String(info[k]).slice(0, 3000); });
+  if (Array.isArray(info.days)) {
+    const hm = function (v) { v = String(v || '').trim(); return /^\d{1,2}:\d{2}$/.test(v) ? ('0' + v).slice(-5) : ''; };
+    out.days = info.days.slice(0, 120).filter(function (d) { return isIsoDate_(String(d.date || '')); }).map(function (d) {
+      return { date: String(d.date), open: hm(d.open), close: hm(d.close), closed: !!d.closed };
+    });
+    out.openingHours = hoursSummary_(out.days) || out.openingHours || '';
+    if (!out.openingHours) delete out.openingHours;
+  }
   if (Array.isArray(info.focusGames)) out.focusGames = info.focusGames.map(String).filter(Boolean).slice(0, 60);
   if (Array.isArray(info.targets)) {
     out.targets = info.targets.slice(0, 40).map(function (t) {
@@ -469,6 +479,21 @@ function cleanInfo_(info) {
     }).filter(function (t) { return t.key || t.label || t.target !== ''; });
   }
   return out;
+}
+
+/* "16:00-23:00 every day", "Weekdays 16:00-23:00 / Weekends 12:00-23:00" or one line per day */
+function hoursSummary_(days) {
+  const open = days.filter(function (d) { return !d.closed && d.open && d.close; });
+  if (!open.length) return '';
+  const span = function (d) { return d.open + '-' + d.close; };
+  const uniq = function (arr) { return arr.filter(function (v, i) { return arr.indexOf(v) === i; }); };
+  const all = uniq(open.map(span));
+  const closedN = days.filter(function (d) { return d.closed; }).length;
+  if (all.length === 1) return all[0] + (closedN ? ' (closed ' + closedN + ' day' + (closedN === 1 ? '' : 's') + ')' : ' every day');
+  const isWe = function (d) { const w = new Date(d.date + 'T12:00:00Z').getUTCDay(); return w === 0 || w === 6; };
+  const wd = uniq(open.filter(function (d) { return !isWe(d); }).map(span)), we = uniq(open.filter(isWe).map(span));
+  if (wd.length <= 1 && we.length <= 1) return [wd.length ? 'Weekdays ' + wd[0] : '', we.length ? 'Weekends ' + we[0] : ''].filter(Boolean).join(' / ');
+  return open.map(function (d) { return d.date.slice(5) + ' ' + span(d); }).join(', ');
 }
 
 function saveBreakeven_(id, be) {
@@ -917,7 +942,14 @@ function closingHour_(text) {
 }
 
 function accessEnds_(ev, settings) {
-  const close = closingHour_(settings['Opening Hours']);
+  let close = null;
+  const days = ev.info && Array.isArray(ev.info.days) ? ev.info.days.filter(function (d) { return !d.closed && d.close; }) : [];
+  const last = days.filter(function (d) { return d.date === ev.endDate; })[0];
+  if (last) {
+    const c = Number(last.close.slice(0, 2)) + Number(last.close.slice(3)) / 60, o = last.open ? Number(last.open.slice(0, 2)) + Number(last.open.slice(3)) / 60 : 0;
+    close = c <= o || c < 6 ? c + 24 : c;
+  }
+  if (close === null) close = closingHour_(settings['Opening Hours']);
   const midnight = Utilities.parseDate(ev.endDate + ' 00:00', tz_(), 'yyyy-MM-dd HH:mm').getTime();
   return midnight + ((close === null ? 24 : close) + 12) * 3600000;
 }
@@ -1403,7 +1435,7 @@ function dayState_(ss) {
     counts: counts, countsFor: purposeWanted, lastClosedAt: !open && last ? String(last[4]) : '' };
 }
 
-/* What should be in the drawer: opening cash + cash taken − change and refunds given − handovers. */
+/* What should be in the drawer: opening cash + cash taken − change and refunds given − handovers + cash added. */
 function expectedCash_(ss, settings, asOf) {
   let usd = Number(settings['Opening Cash USD']) || 0;
   let lbp = Number(settings['Opening Cash LBP']) || 0;
@@ -1415,10 +1447,12 @@ function expectedCash_(ss, settings, asOf) {
   });
   const cash = ss.getSheetByName('Cash');
   if (cash) cash.getDataRange().getValues().slice(1).forEach(function (r) {
-    if (String(r[2]) !== 'Handover') return;
+    const k = String(r[2]);
+    if (k !== 'Handover' && k !== 'Cash In') return;
     if (asOf && String(r[1]) > asOf) return;
-    usd -= Number(r[3]) || 0;
-    lbp -= Number(r[4]) || 0;
+    const sign = k === 'Cash In' ? 1 : -1;
+    usd += sign * (Number(r[3]) || 0);
+    lbp += sign * (Number(r[4]) || 0);
   });
   return { usd: round2_(usd), lbp: Math.round(lbp) };
 }
@@ -1494,6 +1528,16 @@ function recordCash_(id, c) {
     const usd = round2_(Math.max(0, Number(c.usd) || 0));
     const lbp = Math.max(0, Math.round(Number(c.lbp) || 0));
     const state = dayState_(ss);
+    if (c.kind === 'cashin') {
+      const from = String(c.from || '').trim().slice(0, 80);
+      if (!from) throw userError_('Who brought the cash?', 'invalid');
+      if (activeStaffNames_(ss).indexOf(by) < 0) throw userError_('Pick who received it.', 'invalid');
+      if (!usd && !lbp) throw userError_('Enter the amount added.', 'invalid');
+      if (!alreadyIn_(sh, eid)) {
+        sh.appendRow([eid, stamp, 'Cash In', usd, lbp, from, by, String(c.note || '').slice(0, 200), '', '', '', '', '', state.tag, JSON.stringify(c.banknotes || {}).slice(0, 500)]);
+      }
+      return { id: eid, kind: 'cashin' };
+    }
     if (c.kind === 'handover') {
       const to = String(c.to || '').trim().slice(0, 80);
       if (!to) throw userError_('Who collected the cash?', 'invalid');
@@ -1913,8 +1957,9 @@ function eventReport_(id) {
     chUsd += Number(r[16]) || 0; chLbp += Number(r[17]) || 0; online += Number(r[13]) || 0;
   });
   const cashRows = (ss.getSheetByName('Cash') ? ss.getSheetByName('Cash').getDataRange().getValues().slice(1) : []).filter(function (r) { return String(r[0]).trim(); });
-  const handovers = cashRows.filter(function (r) { return String(r[2]) === 'Handover'; }).map(function (r) {
-    return { at: String(r[1]), usd: Number(r[3]) || 0, lbp: Number(r[4]) || 0, by: String(r[5]), to: String(r[6]), note: String(r[7]), day: r[13] };
+  const handovers = cashRows.filter(function (r) { return String(r[2]) === 'Handover' || String(r[2]) === 'Cash In'; }).map(function (r) {
+    return { at: String(r[1]), usd: Number(r[3]) || 0, lbp: Number(r[4]) || 0, by: String(r[5]), to: String(r[6]), note: String(r[7]), day: r[13],
+      cashIn: String(r[2]) === 'Cash In' };
   });
   const counts = cashRows.filter(function (r) { return String(r[2]) === 'Count'; }).map(function (r) {
     return { at: String(r[1]), usd: Number(r[3]) || 0, lbp: Number(r[4]) || 0, by: String(r[5]), expUsd: Number(r[8]) || 0, expLbp: Number(r[9]) || 0,
@@ -1974,7 +2019,8 @@ function eventReport_(id) {
     cash: {
       opening: { usd: Number(settings['Opening Cash USD']) || 0, lbp: Number(settings['Opening Cash LBP']) || 0 },
       received: { usd: round2_(recvUsd), lbp: Math.round(recvLbp) }, given: { usd: round2_(chUsd), lbp: Math.round(chLbp) },
-      handedOver: { usd: round2_(handovers.reduce(function (a, h) { return a + h.usd; }, 0)), lbp: handovers.reduce(function (a, h) { return a + h.lbp; }, 0) },
+      handedOver: { usd: round2_(handovers.reduce(function (a, h) { return a + (h.cashIn ? 0 : h.usd); }, 0)), lbp: handovers.reduce(function (a, h) { return a + (h.cashIn ? 0 : h.lbp); }, 0) },
+      cashIn: { usd: round2_(handovers.reduce(function (a, h) { return a + (h.cashIn ? h.usd : 0); }, 0)), lbp: handovers.reduce(function (a, h) { return a + (h.cashIn ? h.lbp : 0); }, 0) },
       expected: expectedCash_(ss, settings, null), online: round2_(online), handovers: handovers.reverse(), counts: counts.reverse()
     },
     pay: pay,
@@ -2134,6 +2180,7 @@ function pnl_(id, writeSheet) {
     try {
       const f = findEventRow_(id);
       f.sheet.getRange(f.row, 14, 1, 3).setValues([[days.length, out.dashboard.avgUnitsPerDay, out.dashboard.avgPerDay]]);
+      f.sheet.getRange(f.row, 18, 1, 4).setValues([[out.dashboard.units, out.dashboard.sales, demo.customers, out.lines.netPct]]);
     } catch (e) { console.error(e); }
   }
   return out;

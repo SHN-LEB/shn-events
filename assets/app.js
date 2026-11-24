@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.9.0';
+  var APP_VERSION = '1.10.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var DRAFT_TABS = [
@@ -548,7 +548,6 @@
   /* ---------------- info page (drafts and launched events) */
   var INFO_FORM = [
     ['description', 'Description', 'area', 'What the event is, who comes, anything worth knowing'],
-    ['openingHours', 'Opening hours', 'text', 'e.g. WD: 4pm-11pm / WE: 12pm-11pm'],
     ['mapsLink', 'Google Maps link', 'url', 'https://maps.app.goo.gl/…'],
     ['standLocation', 'Stand location', 'text', 'e.g. Near the main entrance, next to the food court'],
     ['standSize', 'Stand size', 'text', 'e.g. 3x3 m'],
@@ -579,18 +578,19 @@
       '<div class="field"><label for="iVenue">Location</label><input class="input" id="iVenue" maxlength="80" value="' + esc(ev.venue) + '"></div>' +
       '<div class="field"><label for="iStart">Start date</label><input class="input" id="iStart" type="date" value="' + esc(ev.startDate) + '"></div>' +
       '<div class="field"><label for="iEnd">End date</label><input class="input" id="iEnd" type="date" value="' + esc(ev.endDate) + '"></div>' +
-      INFO_FORM.slice(0, 2).map(field).join('') +
+      INFO_FORM.slice(0, 1).map(field).join('') +
       '</div></section>' +
-      '<section class="card card-pad"><h3>Place and stand</h3><div class="info-grid">' + INFO_FORM.slice(2, 5).map(field).join('') +
+      '<section class="card card-pad"><h3>Opening hours</h3><div id="hoursBox"></div></section>' +
+      '<section class="card card-pad"><h3>Place and stand</h3><div class="info-grid">' + INFO_FORM.slice(1, 4).map(field).join('') +
       '<div class="field"><label>&nbsp;</label><a class="btn btn-ghost" id="mapsOpen" target="_blank" rel="noopener"' + (info.mapsLink ? ' href="' + f('mapsLink') + '"' : ' hidden') + '>Open in Maps</a></div>' +
       '</div></section>' +
-      '<section class="card card-pad"><h3>Organizer and timing</h3><div class="info-grid">' + INFO_FORM.slice(5, 10).map(field).join('') + '</div></section>' +
+      '<section class="card card-pad"><h3>Organizer and timing</h3><div class="info-grid">' + INFO_FORM.slice(4, 9).map(field).join('') + '</div></section>' +
       '<section class="card card-pad"><h3>Targets</h3><div id="targetsBox"></div>' +
       (info.objectives ? '<p class="small muted">Earlier notes: ' + esc(info.objectives) + '</p>' : '') + '</section>' +
       '<section class="card card-pad"><h3>Focus games</h3>' +
       '<div class="field"><div class="focus-add"><input class="input" id="iFocus" list="catNames" placeholder="Type to search the SHN Catalogue" autocomplete="off">' +
       '<button type="button" class="btn btn-ghost" id="focusAdd">Add</button></div><datalist id="catNames"></datalist><div class="chips focus-chips" id="focusChips"></div></div>' +
-      '<div class="info-grid">' + INFO_FORM.slice(10).map(field).join('') + '</div></section>' +
+      '<div class="info-grid">' + INFO_FORM.slice(9).map(field).join('') + '</div></section>' +
       '<div class="info-save"><span class="small muted">Nothing is mandatory. Changes save by themselves.</span><span class="autosave ok" id="infoState">Saved ✓</span></div>' +
       '</form>';
     var saver = autosaver(document.getElementById('infoState'), function () {
@@ -620,6 +620,59 @@
     }
     drawFocus();
     info.targets = targetRows(info);
+    var oldHoursText = !info.days && info.openingHours ? info.openingHours : '';
+    info.days = eventDays(ev, info);
+    var fill = null; // 'all' or 'week': the quick-fill panel that is open
+    function drawHours() {
+      var box = document.getElementById('hoursBox');
+      var t = function (id, v) { return '<input class="input hr-in" type="time" id="' + id + '" value="' + esc(v || '') + '">'; };
+      box.innerHTML = '<div class="hr-tools"><button type="button" class="btn btn-ghost btn-sm' + (fill === 'all' ? ' active' : '') + '" id="fillAll">Same for all days</button>' +
+        '<button type="button" class="btn btn-ghost btn-sm' + (fill === 'week' ? ' active' : '') + '" id="fillWeek">Same for all weekdays / weekends</button></div>' +
+        (fill === 'all' ? '<div class="hr-fill"><span>Every day</span>' + t('fAo', '') + '<span>to</span>' + t('fAc', '') + '<button type="button" class="btn btn-primary btn-sm" id="fApply">Apply to all days</button></div>' : '') +
+        (fill === 'week' ? '<div class="hr-fill"><span>Weekdays</span>' + t('fWo', '') + '<span>to</span>' + t('fWc', '') + '</div>' +
+          '<div class="hr-fill"><span>Weekends</span>' + t('fEo', '') + '<span>to</span>' + t('fEc', '') + '<button type="button" class="btn btn-primary btn-sm" id="fApply">Apply</button></div>' : '') +
+        (oldHoursText ? '<p class="small muted">Earlier text: ' + esc(oldHoursText) + '</p>' : '') +
+        '<table class="tbl hr-tbl"><thead><tr><th>Day</th><th>Opening</th><th>Closing</th><th class="num">Hours</th><th>Closed</th></tr></thead><tbody>' +
+        info.days.map(function (d, i) {
+          var we = isWeekend(d.date);
+          return '<tr class="' + (d.closed ? 'hr-closed' : '') + '"><td><b>' + esc(fmtDay(d.date, false)) + '</b>' + (we ? ' <span class="pref">weekend</span>' : '') + '</td>' +
+            '<td>' + (d.closed ? '–' : '<input class="input hr-in" type="time" data-ho="' + i + '" value="' + esc(d.open) + '">') + '</td>' +
+            '<td>' + (d.closed ? '–' : '<input class="input hr-in" type="time" data-hc="' + i + '" value="' + esc(d.close) + '">') + '</td>' +
+            '<td class="num">' + (d.closed ? '–' : spanHours(d) ? (Math.round(spanHours(d) * 10) / 10) + ' h' : '') + '</td>' +
+            '<td><input type="checkbox" data-hx="' + i + '"' + (d.closed ? ' checked' : '') + ' aria-label="Closed"></td></tr>';
+        }).join('') + '</tbody><tfoot><tr><td colspan="3"><b>Total</b></td><td class="num"><b>' + (Math.round(totalHours(info.days) * 10) / 10) + ' h</b></td><td></td></tr></tfoot></table>';
+      var fa = document.getElementById('fillAll'), fw = document.getElementById('fillWeek');
+      fa.onclick = function () { fill = fill === 'all' ? null : 'all'; drawHours(); };
+      fw.onclick = function () { fill = fill === 'week' ? null : 'week'; drawHours(); };
+      var ap = document.getElementById('fApply');
+      if (ap) ap.onclick = function () {
+        var v = function (id) { var x = document.getElementById(id); return x ? x.value : ''; };
+        info.days.forEach(function (d) {
+          if (d.closed) return;
+          if (fill === 'all') { d.open = v('fAo') || d.open; d.close = v('fAc') || d.close; }
+          else if (isWeekend(d.date)) { d.open = v('fEo') || d.open; d.close = v('fEc') || d.close; }
+          else { d.open = v('fWo') || d.open; d.close = v('fWc') || d.close; }
+        });
+        fill = null; markDirty(); drawHours();
+      };
+      Array.prototype.forEach.call(box.querySelectorAll('[data-ho],[data-hc]'), function (x) {
+        x.onchange = function () {
+          var d = info.days[Number(x.getAttribute('data-ho') || x.getAttribute('data-hc'))];
+          if (x.hasAttribute('data-ho')) d.open = x.value; else d.close = x.value;
+          markDirty(); drawHours();
+        };
+      });
+      Array.prototype.forEach.call(box.querySelectorAll('[data-hx]'), function (x) {
+        x.onchange = function () { info.days[Number(x.getAttribute('data-hx'))].closed = x.checked; markDirty(); drawHours(); };
+      });
+    }
+    drawHours();
+    ['iStart', 'iEnd'].forEach(function (k) {
+      document.getElementById(k).addEventListener('change', function () {
+        var st = document.getElementById('iStart').value, en = document.getElementById('iEnd').value;
+        if (st && en && en >= st) { info.days = eventDays({ startDate: st, endDate: en }, info); drawHours(); }
+      });
+    });
     function drawTargets() {
       document.getElementById('targetsBox').innerHTML = '<table class="tbl tg-tbl"><thead><tr><th>Objective</th><th class="num">Target</th><th class="tg-low">Lower is better</th><th></th></tr></thead><tbody>' +
         info.targets.map(function (t, i) {
@@ -666,6 +719,28 @@
     Array.prototype.forEach.call(body.querySelectorAll('select,input[type="date"]'), function (x) { x.addEventListener('change', markDirty); });
     leaveGuard(saver.leaving, saver.unsaved);
   }
+
+  /* event days with opening and closing time (kept in Info) */
+  function isoAdd(iso, n) { var d = parseDay(iso); d.setDate(d.getDate() + n); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function isWeekend(iso) { var w = parseDay(iso).getDay(); return w === 0 || w === 6; }
+  function eventDays(ev, info) {
+    var have = {};
+    ((info && info.days) || []).forEach(function (d) { have[d.date] = d; });
+    var out = [], n = daysBetween(ev.startDate, ev.endDate);
+    for (var i = 0; i < n && i < 120; i++) {
+      var iso = isoAdd(ev.startDate, i), h = have[iso] || {};
+      out.push({ date: iso, open: h.open || '', close: h.close || '', closed: !!h.closed });
+    }
+    return out;
+  }
+  function spanHours(d) {
+    if (d.closed || !d.open || !d.close) return 0;
+    var t = function (v) { var p = v.split(':'); return Number(p[0]) + Number(p[1]) / 60; };
+    var o = t(d.open), c = t(d.close);
+    if (c <= o) c += 24;
+    return c - o;
+  }
+  function totalHours(days) { return days.reduce(function (a, d) { return a + spanHours(d); }, 0); }
 
   /* targets: three fixed ones, then the event's own (always numbers) */
   var FIXED_TARGETS = [
@@ -857,38 +932,56 @@
 
   function beDefaults(ev) {
     var d = ev.defaults || {};
-    var info = ev.info || {};
     return {
-      days: daysBetween(ev.startDate, ev.endDate), hoursPerDay: hoursFrom(info.openingHours || (ev.settings && ev.settings.openingHours)), staffCount: 2,
+      days: daysBetween(ev.startDate, ev.endDate), hoursPerDay: 8, extraHours: 1, staffCount: 2,
       staffRate: d.staffRate || 3, avgPrice: 25, overPct: 20, commUnder: 0.5, commOver: 1, threshold: (ev.settings && ev.settings.commissionThreshold) || d.threshold || 30,
-      cogsPct: (ev.settings && ev.settings.cogsPct) || d.cogsPct || 35, rentFixed: 0, rentPct: 0, others: [], otherPct: 0, targetPct: 30,
-      refEvent: '', refUnits: '', growthPct: 10
+      cogsPct: (ev.settings && ev.settings.cogsPct) || d.cogsPct || 35, rentFixed: 0, rentPct: 0, others: [], otherPct: 0
     };
   }
 
-  function beCalc(b) {
+  /* days open and opening hours: from the Info page when filled, else the two fields of the simulation */
+  function beHours(ev, b) {
+    var days = eventDays(ev, ev.info || {});
+    var open = days.filter(function (d) { return !d.closed; });
+    var hrs = totalHours(open);
+    if (hrs > 0) return { fromInfo: true, days: open.length, hours: hrs };
+    return { fromInfo: false, days: Math.max(1, Number(b.days) || 1), hours: Math.max(1, Number(b.days) || 1) * (Number(b.hoursPerDay) || 0) };
+  }
+  function targetPct(ev) {
+    var t = ((ev.info && ev.info.targets) || []).filter(function (x) { return x.key === 'margin'; })[0];
+    return t && t.target !== '' && t.target != null ? Number(t.target) : null;
+  }
+
+  function beCalc(b, ev) {
     var n = function (v) { var x = Number(v); return isNaN(x) ? 0 : x; };
-    var days = Math.max(1, n(b.days)), price = n(b.avgPrice);
-    var staffCost = days * n(b.hoursPerDay) * n(b.staffCount) * n(b.staffRate);
+    var h = ev ? beHours(ev, b) : { days: Math.max(1, n(b.days)), hours: Math.max(1, n(b.days)) * n(b.hoursPerDay) };
+    var days = h.days, price = n(b.avgPrice);
+    var staffHours = h.hours + n(b.extraHours) * days;
+    var staffCost = staffHours * n(b.staffCount) * n(b.staffRate);
     var otherFixed = (b.others || []).reduce(function (a, o) { return a + n(o.amount); }, 0);
     var fixed = n(b.rentFixed) + otherFixed + staffCost;
     var over = Math.min(100, Math.max(0, n(b.overPct))) / 100;
     var comm = over * n(b.commOver) + (1 - over) * n(b.commUnder);
-    var pctCosts = (n(b.cogsPct) + n(b.rentPct) + n(b.otherPct)) / 100;
-    var contrib = price * (1 - pctCosts) - comm;
-    var out = { days: days, price: price, staffCost: staffCost, otherFixed: otherFixed, fixed: fixed, comm: comm, contrib: contrib, rentPerDay: n(b.rentFixed) / days };
+    var contrib = price * (1 - (n(b.cogsPct) + n(b.rentPct) + n(b.otherPct)) / 100) - comm;
+    var at = function (units) {
+      if (units == null) return null;
+      var sales = units * price;
+      var r = { units: units, perDay: units / days, sales: sales, cogs: sales * n(b.cogsPct) / 100, comm: units * comm, staffHours: staffCost,
+        rentFixed: n(b.rentFixed), rentVar: sales * n(b.rentPct) / 100, otherFixed: otherFixed, otherVar: sales * n(b.otherPct) / 100 };
+      r.staff = r.staffHours + r.comm; r.rent = r.rentFixed + r.rentVar; r.other = r.otherFixed + r.otherVar;
+      r.total = r.cogs + r.staff + r.rent + r.other; r.profit = sales - r.total;
+      return r;
+    };
+    var out = { days: days, hours: h.hours, staffHours: staffHours, price: price, staffCost: staffCost, fixed: fixed, comm: comm, contrib: contrib, fromInfo: h.fromInfo };
     out.beTotal = contrib > 0 ? fixed / contrib : null;
     out.bePerDay = out.beTotal == null ? null : out.beTotal / days;
-    var t = n(b.targetPct) / 100, tc = contrib - t * price;
-    out.tTotal = tc > 0 ? fixed / tc : null;
-    out.tPerDay = out.tTotal == null ? null : out.tTotal / days;
-    var ref = n(b.refUnits);
-    if (ref > 0) {
-      out.fPerDay = ref * (1 + n(b.growthPct) / 100);
-      out.fTotal = out.fPerDay * days;
-      out.fSales = out.fTotal * price;
-      out.fProfit = out.fTotal * contrib - fixed;
-      out.fPct = out.fSales ? out.fProfit / out.fSales * 100 : 0;
+    out.be = at(out.beTotal);
+    out.targetPct = ev ? targetPct(ev) : null;
+    if (out.targetPct != null) {
+      var tc = contrib - out.targetPct / 100 * price;
+      out.tTotal = tc > 0 ? fixed / tc : null;
+      out.tPerDay = out.tTotal == null ? null : out.tTotal / days;
+      out.t = at(out.tTotal);
     }
     return out;
   }
@@ -896,35 +989,42 @@
   function viewBreakeven(body, ev) {
     var b = Object.assign(beDefaults(ev), ev.breakeven || {});
     b.others = (b.others || []).map(function (o) { return { label: o.label || '', amount: o.amount }; });
-    var past = (state.events || []).filter(function (e) { return e.id !== ev.id && e.avgUnitsPerDay > 0; });
     if (!state.events) api('listEvents').then(function (res) { state.events = res.events || []; if (document.getElementById('beForm')) viewBreakeven(body, ev); }).catch(function () {});
+    var withData = (state.events || []).filter(function (e) { return e.id !== ev.id && e.totals && e.daysSold > 0; });
+    if (!b.past) {
+      b.past = withData.filter(function (e) { return e.type === 'Sales'; }).sort(function (x, y) { return x.endDate < y.endDate ? 1 : -1; }).slice(0, 5)
+        .map(function (e) { return { id: e.id }; });
+    }
     var launched = ev.status !== 'Draft';
-    var inp = function (k, label, suffix, step) {
-      return '<div class="field"><label>' + label + '</label><div class="in-suffix"><input class="input" data-be="' + k + '" inputmode="decimal" value="' + esc(b[k]) + '"' + (step ? ' step="' + step + '"' : '') + '>' +
+    var hrs = beHours(ev, b);
+    var inp = function (k, label, suffix) {
+      return '<div class="field"><label>' + label + '</label><div class="in-suffix"><input class="input" data-be="' + k + '" inputmode="decimal" value="' + esc(b[k]) + '">' +
         (suffix ? '<span>' + suffix + '</span>' : '') + '</div></div>';
     };
     body.innerHTML =
       '<div class="be-wrap"><form class="be-form" id="beForm">' +
       '<section class="card card-pad"><h3>Event and staff</h3><div class="be-grid">' +
-      inp('days', 'Number of days', 'days') + inp('hoursPerDay', 'Opening hours per day', 'h') + inp('staffCount', 'Staff on the stand', 'people') + inp('staffRate', 'Rate per hour', '$') +
-      '</div></section>' +
+      (hrs.fromInfo
+        ? '<div class="field"><label>Days and opening hours</label><div class="be-out">' + hrs.days + ' days · ' + (Math.round(hrs.hours * 10) / 10) + ' h</div>' +
+          '<div class="pref">From <a href="#/event/' + encodeURIComponent(ev.id) + '/info">Info</a></div></div>'
+        : inp('days', 'Number of days', 'days') + inp('hoursPerDay', 'Opening hours per day', 'h')) +
+      inp('extraHours', 'Extra staff hours per day', 'h') + inp('staffCount', 'Staff on the stand', 'people') + inp('staffRate', 'Rate per hour', '$') +
+      '</div>' + (hrs.fromInfo ? '' : '<div class="small muted">Set each day\'s opening and closing time in Info to use the real total.</div>') +
+      '<div class="small muted" id="staffHrs"></div></section>' +
       '<section class="card card-pad"><h3>Sales and commission</h3><div class="be-grid">' +
       inp('avgPrice', 'Average game price', '$') + inp('cogsPct', 'COGS', '% of price') +
       inp('threshold', 'Commission threshold', '$') + inp('overPct', 'Games sold at/over threshold', '%') +
       inp('commUnder', 'Commission under threshold', '$ / game') + inp('commOver', 'Commission at/over threshold', '$ / game') +
       '</div><div class="small muted">Games under the threshold: <b id="underPct"></b>. No VAT is taken off the price.</div></section>' +
       '<section class="card card-pad"><h3>Rent</h3><div class="be-grid">' + inp('rentFixed', 'Fixed rent (whole event)', '$') + inp('rentPct', 'Rent as % of sales', '%') +
-      '<div class="field"><label>Rent per day</label><div class="be-out" id="rentDay"></div></div></div></section>' +
+      '<div class="field"><label>Fixed rent per day</label><div class="be-out" id="rentDay"></div></div></div></section>' +
       '<section class="card card-pad"><h3>Other expenses</h3><div id="others"></div>' +
       '<button type="button" class="btn btn-ghost btn-sm" id="otherAdd">+ Add expense</button>' +
       '<div class="be-grid" style="margin-top:12px">' + inp('otherPct', 'Other expenses as % of sales', '%') + '</div></section>' +
-      '<section class="card card-pad"><h3>Target and forecast</h3><div class="be-grid">' + inp('targetPct', 'Target profit', '% of sales') +
-      '<div class="field"><label>Similar past event</label><select class="input" id="beRef"><option value="">Type the figure</option>' +
-      past.map(function (e) { return '<option value="' + esc(e.id) + '"' + (b.refEvent === e.id ? ' selected' : '') + '>' + esc(e.name) + ' (' + e.avgUnitsPerDay + '/day)</option>'; }).join('') + '</select></div>' +
-      inp('refUnits', 'Games a day at that event', 'games') + inp('growthPct', 'Growth expected', '%') +
-      '</div></section>' +
       '<div class="info-save"><span class="small muted" id="beHint"></span><span class="autosave ok" id="beState">Saved ✓</span></div>' +
-      '</form><aside class="be-results" id="beResults"></aside></div>';
+      '</form><aside class="be-results" id="beResults"></aside></div>' +
+      '<section class="card card-pad be-past"><h3>Past events data for reference</h3><div class="table-wrap" id="pastBox"></div>' +
+      '<button type="button" class="btn btn-ghost btn-sm" id="pastAdd" style="margin-top:8px">+ Add event</button></section>';
 
     var saver = autosaver(document.getElementById('beState'), function () {
       var save = Object.assign({}, b, { others: b.others.filter(function (o) { return o.label || Number(o.amount); }), savedAt: new Date().toISOString() });
@@ -944,40 +1044,79 @@
     }
     document.getElementById('otherAdd').onclick = function () { b.others.push({ label: '', amount: '' }); markDirty(); drawOthers(); };
     Array.prototype.forEach.call(body.querySelectorAll('[data-be]'), function (x) {
-      x.oninput = function () {
-        b[x.getAttribute('data-be')] = x.value.replace(/[^0-9.]/g, '');
-        if (x.getAttribute('data-be') === 'refUnits') { b.refEvent = ''; document.getElementById('beRef').value = ''; }
-        markDirty(); drawResults();
-      };
+      x.oninput = function () { b[x.getAttribute('data-be')] = x.value.replace(/[^0-9.]/g, ''); markDirty(); drawResults(); };
     });
-    document.getElementById('beRef').onchange = function () {
-      b.refEvent = this.value;
-      var e2 = past.filter(function (x) { return x.id === b.refEvent; })[0];
-      if (e2) { b.refUnits = e2.avgUnitsPerDay; body.querySelector('[data-be="refUnits"]').value = e2.avgUnitsPerDay; }
-      markDirty(); drawResults();
-    };
+
+    /* past events: chosen from the portal's closed events, or typed in */
+    function drawPast() {
+      var box = document.getElementById('pastBox');
+      var cell = function (i, k, v, suffix) { return '<input class="input pe-in" data-pk="' + k + '" data-pi="' + i + '" inputmode="decimal" placeholder="–" value="' + esc(v == null ? '' : v) + '">' + (suffix || ''); };
+      box.innerHTML = '<table class="tbl pe-tbl"><thead><tr><th>Event</th><th class="num">Games / day</th><th class="num">Total games sold</th><th class="num">Total sales</th><th class="num">People activated</th><th class="num">Profit %</th><th></th></tr></thead><tbody>' +
+        (b.past.length ? b.past.map(function (r, i) {
+          var e = r.manual ? null : withData.filter(function (x) { return x.id === r.id; })[0];
+          var sel = '<div class="pe-ev"><select class="input" data-pe="' + i + '"><option value="">Pick an event</option>' +
+            withData.map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === r.id ? ' selected' : '') + '>' + esc(x.name) + '</option>'; }).join('') +
+            '<option value="__manual"' + (r.manual ? ' selected' : '') + '>Type it in…</option></select>' +
+            (r.manual ? '<input class="input" data-pk="name" data-pi="' + i + '" placeholder="Event name, e.g. Sassine 2024" value="' + esc(r.name || '') + '">' : '') + '</div>';
+          if (r.manual) {
+            return '<tr><td>' + sel + '</td><td class="num">' + cell(i, 'perDay', r.perDay) + '</td><td class="num">' + cell(i, 'units', r.units) + '</td><td class="num">' + cell(i, 'sales', r.sales) + '</td>' +
+              '<td class="num">' + cell(i, 'activated', r.activated) + '</td><td class="num">' + cell(i, 'pct', r.pct) + '</td><td><button type="button" class="link-btn neg" data-pdel="' + i + '" aria-label="Remove">×</button></td></tr>';
+          }
+          var t = e ? e.totals : null;
+          return '<tr><td>' + sel + (e ? '<div class="pref">' + esc(fmtRange(e.startDate, e.endDate)) + ' · ' + e.daysSold + ' days</div>' : '') + '</td>' +
+            '<td class="num"><b>' + (e ? e.avgUnitsPerDay : '–') + '</b></td><td class="num">' + (t ? num(t.units) : '–') + '</td><td class="num">' + (t ? money(t.sales) : '–') + '</td>' +
+            '<td class="num">' + (t ? num(t.activated) : '–') + '</td><td class="num">' + (t ? t.netPct + '%' : '–') + '</td>' +
+            '<td><button type="button" class="link-btn neg" data-pdel="' + i + '" aria-label="Remove">×</button></td></tr>';
+        }).join('') : '<tr><td colspan="7" class="muted">No past events yet. Closed events show here by themselves; use + to type in an older one.</td></tr>') + '</tbody></table>';
+      Array.prototype.forEach.call(box.querySelectorAll('[data-pe]'), function (x) {
+        x.onchange = function () {
+          var i = Number(x.getAttribute('data-pe'));
+          b.past[i] = x.value === '__manual' ? { manual: true, name: '' } : { id: x.value };
+          markDirty(); drawPast();
+        };
+      });
+      Array.prototype.forEach.call(box.querySelectorAll('[data-pk]'), function (x) {
+        x.oninput = function () {
+          var k = x.getAttribute('data-pk');
+          if (k !== 'name') x.value = x.value.replace(/[^0-9.]/g, '');
+          b.past[Number(x.getAttribute('data-pi'))][k] = x.value;
+          markDirty();
+        };
+      });
+      Array.prototype.forEach.call(box.querySelectorAll('[data-pdel]'), function (x) {
+        x.onclick = function () { b.past.splice(Number(x.getAttribute('data-pdel')), 1); markDirty(); drawPast(); };
+      });
+    }
+    document.getElementById('pastAdd').onclick = function () { b.past.push({ id: '' }); markDirty(); drawPast(); };
+
     function perDay(v) { return v == null ? '<span class="neg">Not reachable</span>' : '<b>' + Math.ceil(v - 1e-9) + '</b> <span class="pref">(' + (Math.round(v * 10) / 10) + ')</span>'; }
+    function m0(v) { return v == null ? '–' : (v < 0 ? '−' : '') + money(Math.round(Math.abs(v))); }
     function drawResults() {
-      var c = beCalc(b);
+      var c = beCalc(b, ev);
       document.getElementById('underPct').textContent = Math.max(0, 100 - (Number(b.overPct) || 0)) + '%';
-      document.getElementById('rentDay').textContent = money(Math.round(c.rentPerDay * 100) / 100) + (Number(b.rentPct) ? ' + ' + b.rentPct + '% of sales' : '');
-      var html = '<div class="card card-pad be-card be-main"><div class="k">Break-even</div><div class="be-big">' + perDay(c.bePerDay) + ' <span class="be-unit">games / day</span></div>' +
-        (c.beTotal != null ? '<div class="small muted">' + Math.ceil(c.beTotal) + ' games over ' + c.days + ' day' + (c.days === 1 ? '' : 's') + ' · ' + money(Math.round(c.bePerDay * c.price)) + ' sales a day</div>'
-          : '<div class="small neg">Each game costs more than it brings in. Raise the price or lower the costs.</div>') + '</div>' +
-        '<div class="card card-pad be-card"><div class="k">For ' + (Number(b.targetPct) || 0) + '% profit</div><div class="be-big">' + perDay(c.tPerDay) + ' <span class="be-unit">games / day</span></div>' +
-        (c.tTotal != null ? '<div class="small muted">' + money(Math.round(c.tPerDay * c.price)) + ' sales a day</div>' : '') + '</div>';
-      if (c.fPerDay != null) {
-        var good = c.bePerDay != null && c.fPerDay >= c.bePerDay;
-        html += '<div class="card card-pad be-card ' + (good ? 'be-good' : 'be-bad') + '"><div class="k">Forecast</div><div class="be-big"><b>' + (Math.round(c.fPerDay * 10) / 10) + '</b> <span class="be-unit">games / day</span></div>' +
-          '<div class="small">' + (good ? '✓ Above break-even' : '✗ Below break-even') + ' · profit ' + (c.fProfit < 0 ? '−' : '') + money(Math.abs(Math.round(c.fProfit))) + ' (' + (Math.round(c.fPct * 10) / 10) + '% of ' + money(Math.round(c.fSales)) + ' sales)</div></div>';
-      }
-      html += '<div class="card table-wrap"><table class="tbl be-tbl"><tbody>' +
-        '<tr><td>Staff</td><td class="num">' + money(Math.round(c.staffCost)) + '</td></tr>' +
-        '<tr><td>Fixed rent</td><td class="num">' + money(Number(b.rentFixed) || 0) + '</td></tr>' +
-        '<tr><td>Other expenses (fixed)</td><td class="num">' + money(Math.round(c.otherFixed)) + '</td></tr>' +
-        '<tr class="strong"><td>Fixed costs</td><td class="num">' + money(Math.round(c.fixed)) + '</td></tr>' +
-        '<tr><td>Commission per game <span class="pref">average</span></td><td class="num">' + money(Math.round(c.comm * 100) / 100) + '</td></tr>' +
-        '<tr><td>Left from each game <span class="pref">after COGS, % costs, commission</span></td><td class="num">' + money(Math.round(c.contrib * 100) / 100) + '</td></tr>' +
+      document.getElementById('rentDay').textContent = money(Math.round((Number(b.rentFixed) || 0) / c.days * 100) / 100) + (Number(b.rentPct) ? ' + ' + b.rentPct + '% of sales' : '');
+      document.getElementById('staffHrs').textContent = 'Staff hours: ' + (Math.round(c.staffHours * 10) / 10) + ' h × ' + (Number(b.staffCount) || 0) + ' people = ' + money(Math.round(c.staffCost)) + ' (before commissions).';
+      var tLabel = c.targetPct == null ? 'Target profit' : (Math.round(c.targetPct * 10) / 10) + '% profit';
+      var html = '<div class="be-pair">' +
+        '<div class="card card-pad be-card be-main"><div class="k">Break-even</div><div class="be-big">' + perDay(c.bePerDay) + '</div><div class="be-unit">games / day</div></div>' +
+        '<div class="card card-pad be-card"><div class="k">For ' + esc(tLabel) + '</div>' +
+        (c.targetPct == null ? '<div class="small muted" style="margin-top:6px">Set a <b>Gross profit margin %</b> target in <a href="#/event/' + encodeURIComponent(ev.id) + '/info">Info</a>.</div>'
+          : '<div class="be-big">' + perDay(c.tPerDay) + '</div><div class="be-unit">games / day</div>') + '</div></div>';
+      if (c.be == null) html += '<div class="card card-pad small neg">Each game costs more than it brings in. Raise the price or lower the costs.</div>';
+      var row = function (label, f, sub) {
+        return '<tr><td>' + label + (sub ? '<div class="pref">' + sub + '</div>' : '') + '</td><td class="num">' + (c.be ? m0(f(c.be)) : '–') + '</td><td class="num">' + (c.t ? m0(f(c.t)) : '–') + '</td></tr>';
+      };
+      var rentSub = money(Number(b.rentFixed) || 0) + ' fixed' + (Number(b.rentPct) ? ' + ' + b.rentPct + '% of sales' : '');
+      var otherSub = money(c.be ? Math.round(c.be.otherFixed) : 0) + ' fixed' + (Number(b.otherPct) ? ' + ' + b.otherPct + '% of sales' : '');
+      html += '<div class="card table-wrap"><table class="tbl be-tbl"><thead><tr><th></th><th class="num">At break-even</th><th class="num">At ' + esc(tLabel.toLowerCase()) + '</th></tr></thead><tbody>' +
+        '<tr><td>Games sold <span class="pref">whole event</span></td><td class="num">' + (c.be ? Math.ceil(c.be.units) : '–') + '</td><td class="num">' + (c.t ? Math.ceil(c.t.units) : '–') + '</td></tr>' +
+        row('<b>Sales</b>', function (r) { return r.sales; }) +
+        row('COGS', function (r) { return r.cogs; }, (Number(b.cogsPct) || 0) + '% of sales') +
+        row('Staff', function (r) { return r.staff; }, 'hours ' + money(Math.round(c.staffCost)) + ' + commissions') +
+        row('Rent', function (r) { return r.rent; }, rentSub) +
+        row('Other expenses', function (r) { return r.other; }, otherSub) +
+        '<tr class="strong">' + row('Total expenses', function (r) { return r.total; }).slice(4) +
+        '<tr class="strong">' + row('Profit', function (r) { return r.profit; }).slice(4) +
         '</tbody></table></div>';
       if (launched) html += '<div id="beActual"></div>';
       document.getElementById('beResults').innerHTML = html;
@@ -992,7 +1131,7 @@
           state.pnlLoading = true;
           api('pnl', { id: ev.id, writeSheet: false }).then(function (res) {
             state.pnlLoading = false; state.pnl = { id: ev.id, data: res.pnl };
-            drawActual(beCalc(b));
+            drawActual(beCalc(b, ev));
           }).catch(function () { state.pnlLoading = false; el.innerHTML = ''; });
         }
         return;
@@ -1005,6 +1144,7 @@
         '<div class="small">' + (good ? '✓ Above break-even' : '✗ Below break-even') + ' · net profit so far ' + (L.net < 0 ? '−' : '') + money(Math.abs(L.net)) + ' (' + L.netPct + '%)</div></div>';
     }
     drawOthers();
+    drawPast();
     drawResults();
     document.getElementById('beHint').textContent = ev.breakeven ? 'Changes save by themselves.' : 'Starting values: change any of them and the simulation is saved.';
     if (!ev.breakeven) document.getElementById('beState').textContent = '';
@@ -1138,6 +1278,7 @@
         stat('Opening cash', money(c.opening.usd) + '<div class="sub">' + lbpTxt(c.opening.lbp) + '</div>') +
         stat('Cash taken − given', money(c.received.usd - c.given.usd) + '<div class="sub">' + lbpTxt(c.received.lbp - c.given.lbp) + '</div>') +
         stat('Handed over', money(c.handedOver.usd) + '<div class="sub">' + lbpTxt(c.handedOver.lbp) + '</div>') +
+        (c.cashIn && (c.cashIn.usd || c.cashIn.lbp) ? stat('Cash added', money(c.cashIn.usd) + '<div class="sub">' + lbpTxt(c.cashIn.lbp) + '</div>') : '') +
         '</div><p class="small muted">Online payments so far: ' + money(c.online) + ' (never in the drawer).</p>' +
         '<h2 class="section-title">Cash counts</h2>' +
         (c.counts.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>When</th><th>Type</th><th>By</th><th class="num">Counted</th><th class="num">Expected</th><th class="num">Difference</th></tr></thead><tbody>' +
@@ -1147,10 +1288,12 @@
               '<td class="num">' + money(x.expUsd) + '<div class="pref">' + lbpTxt(x.expLbp) + '</div></td>' +
               '<td class="num">' + sgn(x.diffUsd, money) + '<div class="pref">' + sgn(x.diffLbp, function (v) { return num(v) + ' LBP'; }) + '</div></td></tr>';
           }).join('') + '</tbody></table></div>' : '<div class="card card-pad muted">No cash counts yet.</div>') +
-        '<h2 class="section-title">Handovers</h2>' +
-        (c.handovers.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>When</th><th>Collected by</th><th>From</th><th class="num">USD</th><th class="num">LBP</th><th>Note</th></tr></thead><tbody>' +
+        '<h2 class="section-title">Handovers and cash added</h2>' +
+        (c.handovers.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>When</th><th>Type</th><th>Collected by / brought by</th><th>At the stand</th><th class="num">USD</th><th class="num">LBP</th><th>Note</th></tr></thead><tbody>' +
           c.handovers.map(function (h) {
-            return '<tr><td>' + esc(h.at) + '</td><td><b>' + esc(h.to) + '</b></td><td>' + esc(h.by) + '</td><td class="num">' + money(h.usd) + '</td><td class="num">' + num(h.lbp) + '</td><td>' + esc(h.note) + '</td></tr>';
+            return '<tr><td>' + esc(h.at) + '</td><td>' + (h.cashIn ? '<span class="pill pill-live">Cash added</span>' : '<span class="pill pill-closed">Taken out</span>') + '</td>' +
+              '<td><b>' + esc(h.cashIn ? h.by : h.to) + '</b></td><td>' + esc(h.cashIn ? h.to : h.by) + '</td>' +
+              '<td class="num">' + (h.cashIn ? '+' : '−') + money(h.usd) + '</td><td class="num">' + (h.cashIn ? '+' : '−') + num(h.lbp) + '</td><td>' + esc(h.note) + '</td></tr>';
           }).join('') + '</tbody></table></div>' : '<div class="card card-pad muted">No handovers yet.</div>');
     }
     if (tab === 'shifts') {
@@ -1345,7 +1488,7 @@
       var row = function (k, v, cls) { return '<tr class="' + (cls || '') + '"><td>' + k + '</td><td class="n">' + (v < 0 ? '−' + money(-v) : money(v)) + '</td></tr>'; };
       var people = {};
       r.pay.forEach(function (x) { var q = people[x.name] = people[x.name] || { hours: 0, comm: 0, pay: 0 }; q.hours += x.hours; q.comm += x.commission; q.pay += x.pay; });
-      var be = ev.breakeven ? beCalc(Object.assign(beDefaults(ev), ev.breakeven)) : null;
+      var be = ev.breakeven ? beCalc(Object.assign(beDefaults(ev), ev.breakeven), ev) : null;
       var logo = location.origin + location.pathname.replace(/index\.html$/, '') + 'assets/logo-dark.png';
       var html = '<!doctype html><html><head><meta charset="utf-8"><title>' + esc(ev.startDate.replace(/-/g, '') + ' - ' + ev.name + ' - report') + '</title><style>' +
         'body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#231F20;margin:28px;font-size:12px}h1{font-size:22px;margin:4px 0}h2{font-size:14px;margin:22px 0 8px;color:#EB5C24;border-bottom:2px solid #EB5C24;padding-bottom:3px}' +
