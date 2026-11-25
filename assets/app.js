@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.10.0';
+  var APP_VERSION = '1.12.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var DRAFT_TABS = [
@@ -143,7 +143,7 @@
       ? '<button class="link-btn" id="signOut">Sign out</button>'
       : '';
     var b = document.getElementById('signOut');
-    if (b) b.onclick = function () { setToken(null); state.events = null; go('#/login'); };
+    if (b) b.onclick = function () { setToken(null); state.events = null; if (window.SHN_PROMO) window.SHN_PROMO.reset(); go('#/login'); };
   }
 
   /* ---------------- views */
@@ -225,6 +225,7 @@
     }
 
     app.innerHTML =
+      sectionNav('events') +
       '<div class="page-head"><h1>Events</h1><button class="btn btn-accent" data-new>+ New event</button></div>' +
       '<div id="overview"></div>' +
       (events.length ? '<div class="chips">' + chips + '</div>' : '') + body;
@@ -234,6 +235,13 @@
       b.onclick = function () { state.filter = b.getAttribute('data-filter'); viewHome(); };
     });
     Array.prototype.forEach.call(app.querySelectorAll('[data-new]'), function (b) { b.onclick = openNewEvent; });
+  }
+
+  /* Events | Promoters switch at the top of the management pages */
+  function sectionNav(active) {
+    return '<nav class="section-nav">' + [['events', '#/', 'Events'], ['promoters', '#/promoters', 'Promoters']].map(function (x) {
+      return '<a class="' + (x[0] === active ? 'active' : '') + '" href="' + x[1] + '">' + x[2] + '</a>';
+    }).join('') + '</nav>';
   }
 
   /* running events: today's figures, drawer and warnings */
@@ -1601,7 +1609,9 @@
   }
 
   /* ---------------- router */
-  var staffEvent = new URLSearchParams(location.search).get('e');
+  var qs = new URLSearchParams(location.search);
+  var staffEvent = qs.get('e');
+  var promoLink = qs.get('p') && qs.get('u') ? { p: qs.get('p'), u: qs.get('u') } : null;
 
   var lastHash = location.hash;
   var skipGuard = false;
@@ -1618,6 +1628,10 @@
   function render() {
     guardFn = null; unloadFn = null;
     lastHash = location.hash;
+    if (promoLink) {
+      if (!API_URL) return viewNotConfigured();
+      return window.SHN_PROMO.promoter(promoLink.p, promoLink.u);
+    }
     if (staffEvent) {
       if (!API_URL) return viewNotConfigured();
       return window.SHN_POS.staff(staffEvent);
@@ -1628,6 +1642,7 @@
     var hash = location.hash || '#/';
     if (!getToken() && hash !== '#/login') return go('#/login');
     if (hash === '#/login') return getToken() ? go('#/') : viewLogin();
+    if (hash === '#/promoters' || /^#\/project\//.test(hash)) return window.SHN_PROMO.admin(hash);
     var m = hash.match(/^#\/event\/([^/]+)\/?([a-z]*)$/);
     if (m) return viewEvent(decodeURIComponent(m[1]), m[2] || 'info');
     return viewHome();
@@ -1636,7 +1651,8 @@
   window.SHN = {
     api: api, esc: esc, num: num, money: money, toast: toast, fmtRange: fmtRange, phase: phase,
     version: APP_VERSION, reportError: reportError,
-    app: app, topbarRight: topbarRight, isAdmin: function () { return !!getToken(); }
+    app: app, topbarRight: topbarRight, isAdmin: function () { return !!getToken(); },
+    go: go, loading: loading, showError: showError, sectionNav: sectionNav
   };
 
   window.addEventListener('hashchange', onHash);

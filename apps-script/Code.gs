@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -23,7 +23,8 @@ const MASTER_TABS = {
   Events: ['Event ID', 'Name', 'Type', 'Venue', 'Start Date', 'End Date', 'Status', 'Sheet URL', 'Sheet ID', 'Created At',
     'Info (app)', 'Break-even (app)', 'Copy From', 'Days Sold', 'Avg Units / Day', 'Avg Sales / Day', 'Learnings (app)',
     'Units Sold', 'Sales (USD)', 'Customers Activated', 'Net Profit %'],
-  Settings: ['Setting', 'Value', 'Notes']
+  Settings: ['Setting', 'Value', 'Notes'],
+  Projects: ['Project ID', 'Name', 'Status', 'Sheet URL', 'Sheet ID', 'Created At']
 };
 
 const MASTER_SETTINGS = [
@@ -34,6 +35,7 @@ const MASTER_SETTINGS = [
   ['DEFAULT_MAX_DISCOUNT_PCT', 20, 'Highest discount % a cashier can enter, copied into each new event'],
   ['DEFAULT_OPENING_CASH_USD', 0, 'Copied into each new event'],
   ['DEFAULT_OPENING_CASH_LBP', 0, 'Copied into each new event'],
+  ['PROJECTS_FOLDER_ID', '1DUsY6XkDkimaCmbLjhFCZb4d7YhHHOjR', 'Drive folder where each promoters project gets its Google Sheet'],
   ['MANAGER_PIN', '1234', 'Manager PIN for big returns and discounts above the max. Copied into each new event (changeable there). Change it now'],
   ['RETURN_APPROVAL_USD', 51, 'Returns above this amount (USD) need the manager PIN'],
   ['COMMISSION_THRESHOLD', 30, 'Price (USD) from which the higher commission applies. Copied into each new event'],
@@ -253,6 +255,19 @@ function route_(req) {
     case 'addExpense': requireAdmin_(req); return { expense: addExpense_(req.id, req.expense) };
     case 'deleteExpense': requireAdmin_(req); return { deleted: deleteExpense_(req.id, req.expenseId) };
     case 'pnl': requireAdmin_(req); return { pnl: pnl_(req.id, req.writeSheet !== false) };
+    // promoters
+    case 'listProjects': requireAdmin_(req); return { projects: listProjects_() };
+    case 'createProject': requireAdmin_(req); return { project: createProject_(req.name) };
+    case 'getProject': requireAdmin_(req); return { project: getProject_(req.id) };
+    case 'savePromoter': requireAdmin_(req); return { project: savePromoter_(req.id, req.promoter || {}) };
+    case 'saveLocation': requireAdmin_(req); return { project: saveLocation_(req.id, req.location || {}) };
+    case 'setProjectStatus': requireAdmin_(req); return { project: setProjectStatus_(req.id, req.status) };
+    case 'projectReport': requireAdmin_(req); return { report: projectReport_(req.id) };
+    case 'promoterPublic': return { info: promoterPublic_(req.projectId, req.promoterId) };
+    case 'promoterLogin': return promoterLogin_(req);
+    case 'promoterData': return { data: promoterData_(req.projectId, requirePromoter_(req, req.projectId)) };
+    case 'promoterClock': return { shift: promoterClock_(req.projectId, requirePromoter_(req, req.projectId), req.clock || {}) };
+    case 'promoterSync': return { sync: promoterSync_(req.projectId, requirePromoter_(req, req.projectId), req.sync || {}) };
     default: throw userError_('Unknown action.', 'bad_action');
   }
 }
@@ -2366,3 +2381,484 @@ function dateStr_(v) {
   }
   return String(v || '');
 }
+
+/* ================================================================== PROMOTERS
+   Promoters placed in retail stores. One Google Sheet per project (in PROJECTS_FOLDER_ID), listed in the master Projects tab.
+   Promoters sign in on their own link with a 4-digit code, clock in, pick their store(s) and log units sold per game
+   and people activated. No cash, no stock: the store's cashier takes the payment. */
+
+const PROJECT_TABS = [
+  ['Promoters', ['Promoter ID', 'Name', 'Code', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/unit)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/unit)', 'Active (Y/N)']],
+  ['Locations', ['Location ID', 'Store', 'Location / Branch', 'Logo URL', 'Notes']],
+  ['Products', ['Product', 'Ref Code (auto)', 'Price (USD, auto)', 'Category (auto)']],
+  ['Results', ['Date', 'Promoter ID', 'Promoter', 'Location ID', 'Store', 'Ref Code', 'Product', 'Units', 'Price (USD)', 'Updated At', 'Key']],
+  ['Shifts', ['Shift ID', 'Promoter ID', 'Promoter', 'Date', 'Clock In', 'Clock Out', 'Hours', 'Stores', 'Note Out']],
+  ['Store Time', ['Shift ID', 'Promoter', 'Date', 'Store', 'From', 'To', 'Hours']],
+  ['Catalogue', ['Product', 'Ref Code', 'Price (USD)', 'Category', 'Game Family']]
+];
+const PROMO_TOKEN_DAYS = 14;
+const ACTIVATED_REF = '_act';
+
+function projectsSheet_() { return master_().getSheetByName('Projects'); }
+
+function rowToProject_(r) {
+  return { id: String(r[0]), name: String(r[1]), status: String(r[2] || 'Open'), sheetUrl: String(r[3] || ''), sheetId: String(r[4] || ''),
+    createdAt: r[5] instanceof Date ? r[5].toISOString() : String(r[5] || '') };
+}
+
+function listProjects_() {
+  const sh = projectsSheet_();
+  if (!sh) return [];
+  return sh.getDataRange().getValues().slice(1).filter(function (r) { return String(r[0]).trim(); }).map(rowToProject_);
+}
+
+function findProjectRow_(id) {
+  const sh = projectsSheet_();
+  if (!sh) throw userError_('Run setup in Apps Script first (it adds the Projects tab).', 'not_setup');
+  const values = sh.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (String(values[i][0]) === String(id)) return { sheet: sh, row: i + 1, values: values[i] };
+  }
+  throw userError_('Project not found.', 'not_found');
+}
+
+function createProject_(name) {
+  name = String(name || '').trim().slice(0, 80);
+  if (!name) throw userError_('Give the project a name.', 'invalid');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const have = listProjects_().map(function (p) { return p.id; });
+    let id;
+    do { id = newId_(); } while (have.indexOf(id) >= 0);
+    const folderId = String(masterSetting_('PROJECTS_FOLDER_ID') || '').trim();
+    let folder;
+    try { folder = DriveApp.getFolderById(folderId); } catch (e) { throw userError_('Could not open the promoters folder. Check PROJECTS_FOLDER_ID in the master Settings.', 'folder'); }
+    const catalogue = loadCatalogue_();
+    const ss = SpreadsheetApp.create('SHN LEB Promoters — ' + name);
+    DriveApp.getFileById(ss.getId()).moveTo(folder);
+    buildProjectSheet_(ss, catalogue);
+    const sh = projectsSheet_();
+    const r = sh.getLastRow() + 1;
+    sh.getRange(r, 1, 1, 5).setNumberFormat('@').setValues([[id, name, 'Open', ss.getUrl(), ss.getId()]]);
+    sh.getRange(r, 6).setNumberFormat('yyyy-mm-dd hh:mm').setValue(new Date());
+    return getProject_(id);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function buildProjectSheet_(ss, catalogue) {
+  ss.setSpreadsheetLocale('en_US');
+  ss.setSpreadsheetTimeZone(tz_());
+  const first = ss.getSheets()[0];
+  PROJECT_TABS.forEach(function (t, i) {
+    const sh = i === 0 ? first.setName(t[0]) : ss.insertSheet(t[0]);
+    writeHeader_(sh, t[1]);
+    sh.setFrozenRows(1);
+  });
+  const cat = ss.getSheetByName('Catalogue');
+  if (catalogue.length) {
+    cat.getRange(2, 2, catalogue.length, 1).setNumberFormat('@');
+    cat.getRange(2, 1, catalogue.length, 5).setValues(catalogue);
+  }
+  cat.hideSheet();
+  const strict = function (range) { return SpreadsheetApp.newDataValidation().requireValueInRange(range, true).setAllowInvalid(false).build(); };
+  const list = function (vals) { return SpreadsheetApp.newDataValidation().requireValueInList(vals, true).setAllowInvalid(false).build(); };
+  const prod = ss.getSheetByName('Products');
+  prod.getRange(2, 1, MAX_ROWS, 1).setDataValidation(strict(cat.getRange('A2:A')));
+  prod.getRange(1, 2).setFormula('={"Ref Code (auto)";ARRAYFORMULA(IF(A2:A="","",IFERROR(VLOOKUP(A2:A,Catalogue!A2:E,2,FALSE),"")))}');
+  prod.getRange(1, 3).setFormula('={"Price (USD, auto)";ARRAYFORMULA(IF(A2:A="","",IFERROR(VLOOKUP(A2:A,Catalogue!A2:E,3,FALSE),"")))}');
+  prod.getRange(1, 4).setFormula('={"Category (auto)";ARRAYFORMULA(IF(A2:A="","",IFERROR(VLOOKUP(A2:A,Catalogue!A2:E,4,FALSE),"")))}');
+  prod.getRange(2, 2, MAX_ROWS, 3).setFontStyle('italic').setFontColor('#666666');
+  prod.setColumnWidth(1, 320);
+  const pr = ss.getSheetByName('Promoters');
+  pr.getRange(2, 8, MAX_ROWS, 1).setDataValidation(list(['Y', 'N']));
+  pr.getRange(2, 3, MAX_ROWS, 1).setNumberFormat('@');
+  pr.setColumnWidth(2, 200);
+  pr.getRange(1, 1, 1, 3).setNote('Promoter ID and Code are made by the portal. Add promoters from the portal (Promoters → project → + Add promoter).');
+  const loc = ss.getSheetByName('Locations');
+  loc.setColumnWidth(2, 220); loc.setColumnWidth(3, 220);
+  loc.getRange(1, 1).setNote('Leave Location ID empty: the app fills it the first time it reads the store.');
+  ss.getSheetByName('Results').hideColumns(11);
+  ['Results', 'Shifts', 'Store Time'].forEach(function (t) {
+    ss.getSheetByName(t).getRange('A1:Z1').protect().setWarningOnly(true).setDescription('Written by the app');
+  });
+  ss.setActiveSheet(pr);
+}
+
+function openProject_(id, forWrite) {
+  const p = rowToProject_(findProjectRow_(id).values);
+  if (forWrite && p.status === 'Closed') throw userError_('This project is closed.', 'closed');
+  return { project: p, ss: SpreadsheetApp.openById(p.sheetId) };
+}
+
+/* promoters list; rows typed in the sheet without an ID or code get one */
+function readPromoters_(ss) {
+  const sh = ss.getSheetByName('Promoters');
+  const values = sh.getDataRange().getValues();
+  const ids = {}, codes = {};
+  values.slice(1).forEach(function (r) { if (String(r[0]).trim()) ids[String(r[0]).trim()] = 1; if (String(r[2]).trim()) codes[String(r[2]).trim()] = 1; });
+  const out = [];
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i];
+    const name = String(r[1] || '').trim();
+    if (!name) continue;
+    let id = String(r[0] || '').trim(), code = String(r[2] || '').trim();
+    if (!id) { let n = Object.keys(ids).length + 1; do { id = 'P' + ('00' + n++).slice(-3); } while (ids[id]); ids[id] = 1; sh.getRange(i + 1, 1).setValue(id); }
+    if (!code) { code = newCode_(codes); codes[code] = 1; sh.getRange(i + 1, 3).setNumberFormat('@').setValue(code); }
+    const th = r[5] === '' || r[5] == null ? null : parseMoney_(r[5]);
+    out.push({ id: id, name: name, code: code, hourlyRate: parseMoney_(r[3]), commissionUnder: parseMoney_(r[4]), threshold: th,
+      commissionOver: parseMoney_(r[6]), active: String(r[7] || 'Y').trim().toUpperCase() !== 'N', row: i + 1 });
+  }
+  return out;
+}
+
+function newCode_(taken) {
+  let c;
+  do { c = String(Math.floor(1000 + Math.random() * 9000)); } while (taken[c]);
+  return c;
+}
+
+function readLocations_(ss) {
+  const sh = ss.getSheetByName('Locations');
+  const values = sh.getDataRange().getValues();
+  const ids = {};
+  values.slice(1).forEach(function (r) { if (String(r[0]).trim()) ids[String(r[0]).trim()] = 1; });
+  const out = [];
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i];
+    const store = String(r[1] || '').trim();
+    if (!store) continue;
+    let id = String(r[0] || '').trim();
+    if (!id) { let n = Object.keys(ids).length + 1; do { id = 'L' + ('00' + n++).slice(-3); } while (ids[id]); ids[id] = 1; sh.getRange(i + 1, 1).setValue(id); }
+    out.push({ id: id, store: store, branch: String(r[2] || '').trim(), logo: String(r[3] || '').trim(), notes: String(r[4] || '').trim() });
+  }
+  return out;
+}
+
+function readProducts_(ss) {
+  const seen = {};
+  return ss.getSheetByName('Products').getDataRange().getValues().slice(1).filter(function (r) {
+    const k = String(r[0] || '').trim();
+    if (!k || !String(r[1] || '').trim() || seen[k]) return false;
+    seen[k] = 1;
+    return true;
+  }).map(function (r) { return { name: String(r[0]).trim(), ref: String(r[1]).trim(), price: parseMoney_(r[2]), category: String(r[3] || '') }; })
+    .sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
+}
+
+function readShifts_(ss) {
+  return ss.getSheetByName('Shifts').getDataRange().getValues().slice(1).map(function (r, i) {
+    return { id: String(r[0]), promoterId: String(r[1]), promoter: String(r[2]), date: dateStr_(r[3]), clockIn: String(r[4] || ''), clockOut: String(r[5] || ''),
+      hours: r[6] === '' ? null : Number(r[6]), stores: String(r[7] || ''), note: String(r[8] || ''), row: i + 2 };
+  }).filter(function (x) { return x.id; });
+}
+
+function getProject_(id) {
+  const o = openProject_(id, false);
+  const ss = o.ss;
+  const promoters = readPromoters_(ss).map(function (p) { delete p.row; return p; });
+  const shifts = readShifts_(ss);
+  const open = {};
+  shifts.forEach(function (x) { if (!x.clockOut) open[x.promoterId] = x; });
+  promoters.forEach(function (p) { const x = open[p.id]; p.onShift = x ? { since: x.clockIn, stores: x.stores } : null; });
+  const today = nowStamp_().slice(0, 10);
+  const todayUnits = {};
+  ss.getSheetByName('Results').getDataRange().getValues().slice(1).forEach(function (r) {
+    if (dateStr_(r[0]) !== today || String(r[5]) === ACTIVATED_REF) return;
+    todayUnits[String(r[1])] = (todayUnits[String(r[1])] || 0) + (Number(r[7]) || 0);
+  });
+  promoters.forEach(function (p) { p.unitsToday = todayUnits[p.id] || 0; });
+  return Object.assign(o.project, { promoters: promoters, locations: readLocations_(ss), products: readProducts_(ss) });
+}
+
+/* add a promoter (name), or change one: rates, active, new code */
+function savePromoter_(id, p) {
+  const o = openProject_(id, false);
+  const sh = o.ss.getSheetByName('Promoters');
+  const list = readPromoters_(o.ss);
+  const num = function (v) { return v === '' || v == null ? '' : Number(v); };
+  if (!p.id) {
+    const name = String(p.name || '').trim().slice(0, 80);
+    if (!name) throw userError_('Enter the promoter\'s name.', 'invalid');
+    const ids = {}, codes = {};
+    list.forEach(function (x) { ids[x.id] = 1; codes[x.code] = 1; });
+    let n = list.length + 1, pid;
+    do { pid = 'P' + ('00' + n++).slice(-3); } while (ids[pid]);
+    let r = 2;
+    const col = sh.getRange(1, 2, Math.max(1, sh.getLastRow()), 1).getValues();
+    for (let i = col.length - 1; i >= 0; i--) if (String(col[i][0]).trim()) { r = i + 2; break; }
+    sh.getRange(r, 3).setNumberFormat('@');
+    sh.getRange(r, 1, 1, 8).setValues([[pid, name, newCode_(codes), num(p.hourlyRate), num(p.commissionUnder), num(p.threshold), num(p.commissionOver), 'Y']]);
+    return getProject_(id);
+  }
+  const cur = list.filter(function (x) { return x.id === String(p.id); })[0];
+  if (!cur) throw userError_('Promoter not found.', 'not_found');
+  if (p.name != null && String(p.name).trim()) sh.getRange(cur.row, 2).setValue(String(p.name).trim().slice(0, 80));
+  ['hourlyRate', 'commissionUnder', 'threshold', 'commissionOver'].forEach(function (k, i) {
+    if (p[k] !== undefined) sh.getRange(cur.row, 4 + i).setValue(num(p[k]));
+  });
+  if (p.active !== undefined) sh.getRange(cur.row, 8).setValue(p.active ? 'Y' : 'N');
+  if (p.newCode) {
+    const codes = {};
+    list.forEach(function (x) { codes[x.code] = 1; });
+    sh.getRange(cur.row, 3).setNumberFormat('@').setValue(newCode_(codes));
+  }
+  return getProject_(id);
+}
+
+/* add a store, or change one (store name, branch, logo URL, notes) */
+function saveLocation_(id, l) {
+  const o = openProject_(id, false);
+  const sh = o.ss.getSheetByName('Locations');
+  const list = readLocations_(o.ss);
+  const store = String(l.store || '').trim().slice(0, 80);
+  const vals = [store, String(l.branch || '').trim().slice(0, 80), String(l.logo || '').trim().slice(0, 500), String(l.notes || '').trim().slice(0, 300)];
+  if (!l.id) {
+    if (!store) throw userError_('Enter the store name.', 'invalid');
+    const ids = {};
+    list.forEach(function (x) { ids[x.id] = 1; });
+    let n = list.length + 1, lid;
+    do { lid = 'L' + ('00' + n++).slice(-3); } while (ids[lid]);
+    let r = 2;
+    const col = sh.getRange(1, 2, Math.max(1, sh.getLastRow()), 1).getValues();
+    for (let i = col.length - 1; i >= 0; i--) if (String(col[i][0]).trim()) { r = i + 2; break; }
+    sh.getRange(r, 1, 1, 5).setValues([[lid].concat(vals)]);
+    return getProject_(id);
+  }
+  const values = sh.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === String(l.id)) {
+      if (!store) throw userError_('Enter the store name.', 'invalid');
+      sh.getRange(i + 1, 2, 1, 4).setValues([vals]);
+      return getProject_(id);
+    }
+  }
+  throw userError_('Store not found.', 'not_found');
+}
+
+function setProjectStatus_(id, status) {
+  if (status !== 'Open' && status !== 'Closed') throw userError_('Status must be Open or Closed.', 'invalid');
+  const f = findProjectRow_(id);
+  f.sheet.getRange(f.row, 3).setValue(status);
+  return getProject_(id);
+}
+
+/* ------------------------------------------------------------------ promoter link */
+
+function promoterPublic_(projectId, promoterId) {
+  const o = openProject_(projectId, false);
+  if (o.project.status === 'Closed') throw userError_('This project is closed.', 'closed');
+  const p = readPromoters_(o.ss).filter(function (x) { return x.id === String(promoterId); })[0];
+  if (!p || !p.active) throw userError_('This link is not active. Ask your manager.', 'not_found');
+  return { project: o.project.name, name: p.name };
+}
+
+function promoterLogin_(req) {
+  const o = openProject_(req.projectId, true);
+  const pid = String(req.promoterId || '');
+  const cache = CacheService.getScriptCache();
+  const key = 'pcodefail_' + o.project.id + '_' + pid;
+  const fails = Number(cache.get(key) || 0);
+  if (fails >= 10) throw userError_('Too many wrong codes. Wait 10 minutes and try again.', 'locked');
+  const p = readPromoters_(o.ss).filter(function (x) { return x.id === pid; })[0];
+  if (!p || !p.active) throw userError_('This link is not active. Ask your manager.', 'not_found');
+  if (String(req.code || '').trim() !== p.code) {
+    cache.put(key, String(fails + 1), 600);
+    Utilities.sleep(600);
+    throw userError_('Wrong code.', 'bad_pin');
+  }
+  const exp = Date.now() + PROMO_TOKEN_DAYS * 86400000;
+  // the token carries the code: changing the code in the portal signs the promoter out
+  return { token: signToken_('promo:' + o.project.id + ':' + pid + ':' + sha256Hex_(p.code).slice(0, 8), exp), expires: exp, name: p.name, project: o.project.name };
+}
+
+/* returns the promoter (checked against the sheet: still active, code unchanged, project open) */
+function requirePromoter_(req, projectId) {
+  const role = tokenRole_(req);
+  const parts = role.split(':');
+  if (parts[0] !== 'promo' || parts[1] !== String(projectId)) throw userError_('Please sign in again.', 'auth');
+  const o = openProject_(projectId, true);
+  const p = readPromoters_(o.ss).filter(function (x) { return x.id === parts[2]; })[0];
+  if (!p || !p.active || sha256Hex_(p.code).slice(0, 8) !== parts[3]) throw userError_('Please sign in again.', 'auth');
+  return { promoter: p, project: o.project, ss: o.ss };
+}
+
+function promoterData_(projectId, ctx) {
+  const ss = ctx.ss, p = ctx.promoter;
+  let pics = {};
+  try { pics = pictures_(); } catch (e) { pics = {}; }
+  const open = readShifts_(ss).filter(function (x) { return x.promoterId === p.id && !x.clockOut; }).pop() || null;
+  const counts = {};
+  if (open) {
+    ss.getSheetByName('Results').getDataRange().getValues().slice(1).forEach(function (r) {
+      if (String(r[1]) !== p.id || dateStr_(r[0]) !== open.date) return;
+      const l = String(r[3]);
+      counts[l] = counts[l] || {};
+      counts[l][String(r[5])] = Number(r[7]) || 0;
+    });
+  }
+  return {
+    project: { id: ctx.project.id, name: ctx.project.name }, promoter: { id: p.id, name: p.name },
+    locations: readLocations_(ss),
+    products: readProducts_(ss).map(function (x) { return Object.assign(x, { picture: pics[x.ref] || '' }); }),
+    openShift: open ? { id: open.id, date: open.date, clockIn: open.clockIn, stores: open.stores } : null,
+    counts: counts
+  };
+}
+
+function promoterClock_(projectId, ctx, c) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = ctx.ss, p = ctx.promoter;
+    const sh = ss.getSheetByName('Shifts');
+    const shifts = readShifts_(ss);
+    const stamp = clientStamp_(c);
+    const locs = readLocations_(ss);
+    const storeNames = function (ids) {
+      return (ids || []).map(function (id) { const l = locs.filter(function (x) { return x.id === id; })[0]; return l ? l.store + (l.branch ? ' (' + l.branch + ')' : '') : ''; }).filter(Boolean).join(', ');
+    };
+    if (c.action === 'in') {
+      const sid = idCheck_(c.id, 'shift');
+      const same = shifts.filter(function (x) { return x.id === sid; })[0];
+      if (same) return { id: same.id, date: same.date, clockIn: same.clockIn };
+      const open = shifts.filter(function (x) { return x.promoterId === p.id && !x.clockOut; })[0];
+      if (open) return { id: open.id, date: open.date, clockIn: open.clockIn, already: true };
+      const r = sh.getLastRow() + 1;
+      sh.getRange(r, 1, 1, 9).setNumberFormat('@').setValues([[sid, p.id, p.name, stamp.slice(0, 10), stamp, '', '', storeNames(c.locations), '']]);
+      return { id: sid, date: stamp.slice(0, 10), clockIn: stamp };
+    }
+    if (c.action === 'out') {
+      const x = shifts.filter(function (s2) { return s2.id === String(c.shiftId) && s2.promoterId === p.id; })[0];
+      if (!x) throw userError_('Shift not found.', 'not_found');
+      if (x.clockOut) return { id: x.id, clockOut: x.clockOut };
+      const hours = Math.max(0, Math.round((parseStamp_(stamp) - parseStamp_(x.clockIn)) / 36000) / 100);
+      sh.getRange(x.row, 6, 1, 4).setNumberFormat('@').setValues([[stamp, String(hours), c.locations ? storeNames(c.locations) : x.stores, String(c.note || '').slice(0, 500)]]);
+      sh.getRange(x.row, 7).setNumberFormat('0.00').setValue(hours);
+      // optional: time per store, from the "Working here now" taps
+      const segs = (c.segments || []).filter(function (g) { return g && g.loc && g.from; }).slice(0, 50);
+      if (segs.length) {
+        const ts = ss.getSheetByName('Store Time');
+        const rows = segs.map(function (g, i) {
+          const from = clientStamp_({ clientTime: g.from });
+          const to = clientStamp_({ clientTime: i + 1 < segs.length ? segs[i + 1].from : c.clientTime });
+          return [x.id, p.name, x.date, storeNames([g.loc]), from, to, Math.max(0, Math.round((parseStamp_(to) - parseStamp_(from)) / 36000) / 100)];
+        });
+        ts.getRange(ts.getLastRow() + 1, 1, rows.length, 7).setValues(rows);
+      }
+      return { id: x.id, clockOut: stamp, hours: hours };
+    }
+    throw userError_('Unknown clock action.', 'invalid');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function parseStamp_(s) {
+  return Utilities.parseDate(String(s).slice(0, 16), tz_(), 'yyyy-MM-dd HH:mm').getTime();
+}
+
+/* the running totals of a shift (units per game per store, people activated): written into Results, one row per date+promoter+store+game */
+function promoterSync_(projectId, ctx, s) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = ctx.ss, p = ctx.promoter;
+    const x = readShifts_(ss).filter(function (z) { return z.id === String(s.shiftId) && z.promoterId === p.id; })[0];
+    if (!x) throw userError_('Shift not found.', 'not_found');
+    const locs = {}, prods = {};
+    readLocations_(ss).forEach(function (l) { locs[l.id] = l; });
+    readProducts_(ss).forEach(function (q) { prods[q.ref] = q; });
+    const sh = ss.getSheetByName('Results');
+    const values = sh.getDataRange().getValues();
+    const at = {};
+    for (let i = 1; i < values.length; i++) if (String(values[i][10])) at[String(values[i][10])] = i + 1;
+    const stamp = nowStamp_();
+    const add = [];
+    let changed = 0;
+    Object.keys(s.counts || {}).forEach(function (lid) {
+      const l = locs[lid];
+      if (!l) return;
+      const m = s.counts[lid] || {};
+      Object.keys(m).forEach(function (ref) {
+        const n = Math.max(0, Math.round(Number(m[ref]) || 0));
+        const q = prods[ref];
+        if (ref !== ACTIVATED_REF && !q) return;
+        const key = x.date + '|' + p.id + '|' + lid + '|' + ref;
+        const row = [x.date, p.id, p.name, lid, l.store + (l.branch ? ' (' + l.branch + ')' : ''), ref, ref === ACTIVATED_REF ? 'People activated' : q.name, n, ref === ACTIVATED_REF ? '' : q.price, stamp, key];
+        if (at[key]) {
+          if (Number(values[at[key] - 1][7]) !== n) { sh.getRange(at[key], 8).setValue(n); sh.getRange(at[key], 10).setValue(stamp); changed++; }
+        } else if (n > 0) { add.push(row); }
+      });
+    });
+    if (add.length) {
+      const start = sh.getLastRow() + 1;
+      sh.getRange(start, 1, add.length, 11).setNumberFormat('@');
+      sh.getRange(start, 1, add.length, 11).setValues(add);
+      sh.getRange(start, 8, add.length, 2).setNumberFormat('0.##');
+      add.forEach(function (r, i) { sh.getRange(start + i, 8).setValue(r[7]); if (r[8] !== '') sh.getRange(start + i, 9).setValue(r[8]); });
+    }
+    if (s.locations && !x.clockOut) {
+      const names = s.locations.map(function (id) { const l = locs[id]; return l ? l.store + (l.branch ? ' (' + l.branch + ')' : '') : ''; }).filter(Boolean).join(', ');
+      if (names) ss.getSheetByName('Shifts').getRange(x.row, 8).setValue(names);
+    }
+    return { added: add.length, changed: changed, at: stamp };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ------------------------------------------------------------------ project results for the portal */
+function projectReport_(id) {
+  const o = openProject_(id, false);
+  const ss = o.ss;
+  const promoters = readPromoters_(ss);
+  const byId = {};
+  promoters.forEach(function (p) { byId[p.id] = p; });
+  const shifts = readShifts_(ss);
+  const days = {}, people = {}, stores = {}, games = {};
+  const person = function (pid, name) { return people[pid] = people[pid] || { id: pid, name: name, hours: 0, units: 0, activated: 0, commission: 0, days: {} }; };
+  ss.getSheetByName('Results').getDataRange().getValues().slice(1).forEach(function (r) {
+    if (!String(r[10] || r[0]).trim()) return;
+    const date = dateStr_(r[0]), pid = String(r[1]), n = Number(r[7]) || 0, act = String(r[5]) === ACTIVATED_REF;
+    const pr = person(pid, String(r[2]));
+    pr.days[date] = 1;
+    const st = stores[String(r[3])] = stores[String(r[3])] || { id: String(r[3]), store: String(r[4]), units: 0, activated: 0 };
+    const d = days[date] = days[date] || { date: date, units: 0, activated: 0, promoters: {} };
+    if (act) { pr.activated += n; st.activated += n; d.activated += n; return; }
+    pr.units += n; st.units += n; d.units += n; d.promoters[pr.name] = 1;
+    const g = games[String(r[5])] = games[String(r[5])] || { ref: String(r[5]), name: String(r[6]), units: 0 };
+    g.units += n;
+    const p = byId[pid];
+    if (p) {
+      const price = Number(r[8]) || 0;
+      const rate = p.threshold == null ? p.commissionUnder : (price >= p.threshold ? p.commissionOver : p.commissionUnder);
+      pr.commission += n * (rate || 0);
+    }
+  });
+  shifts.forEach(function (x) {
+    const pr = person(x.promoterId, x.promoter);
+    pr.days[x.date] = 1;
+    if (x.hours != null) pr.hours += x.hours;
+  });
+  const list = Object.keys(people).map(function (k) {
+    const pr = people[k], p = byId[k] || {};
+    pr.hours = round2_(pr.hours); pr.commission = round2_(pr.commission);
+    pr.hourlyPay = round2_(pr.hours * (p.hourlyRate || 0));
+    pr.pay = round2_(pr.hourlyPay + pr.commission);
+    pr.dayCount = Object.keys(pr.days).length; delete pr.days;
+    return pr;
+  }).sort(function (a, b) { return b.units - a.units; });
+  return {
+    promoters: list,
+    stores: Object.keys(stores).map(function (k) { return stores[k]; }).sort(function (a, b) { return b.units - a.units; }),
+    games: Object.keys(games).map(function (k) { return games[k]; }).sort(function (a, b) { return b.units - a.units; }),
+    days: Object.keys(days).sort().reverse().map(function (k) { const d = days[k]; d.promoters = Object.keys(d.promoters).length; return d; }),
+    shifts: shifts.slice(-60).reverse().map(function (x) { delete x.row; return x; }),
+    totals: { units: list.reduce(function (a, x) { return a + x.units; }, 0), activated: list.reduce(function (a, x) { return a + x.activated; }, 0),
+      hours: round2_(list.reduce(function (a, x) { return a + x.hours; }, 0)), pay: round2_(list.reduce(function (a, x) { return a + x.pay; }, 0)) }
+  };
+}
+
