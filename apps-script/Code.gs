@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.13.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -263,6 +263,7 @@ function route_(req) {
     case 'saveLocation': requireAdmin_(req); return { project: saveLocation_(req.id, req.location || {}) };
     case 'setProjectStatus': requireAdmin_(req); return { project: setProjectStatus_(req.id, req.status) };
     case 'projectReport': requireAdmin_(req); return { report: projectReport_(req.id) };
+    case 'payslip': requireAdmin_(req); return { payslip: payslip_(req.id, req.promoterId, req.from, req.to) };
     case 'promoterPublic': return { info: promoterPublic_(req.projectId, req.promoterId) };
     case 'promoterLogin': return promoterLogin_(req);
     case 'promoterData': return { data: promoterData_(req.projectId, requirePromoter_(req, req.projectId)) };
@@ -2548,11 +2549,57 @@ function readProducts_(ss) {
     .sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
 }
 
+/* Shifts tab. Clock In / Clock Out can be edited by hand in the sheet (text "2026-12-01 14:00", a date-time, or just a time like 14:00),
+   and rows can be added by hand for a forgotten clock-in (Promoter ID or name + clock in + clock out). Hours are worked out again from the times. */
 function readShifts_(ss) {
-  return ss.getSheetByName('Shifts').getDataRange().getValues().slice(1).map(function (r, i) {
-    return { id: String(r[0]), promoterId: String(r[1]), promoter: String(r[2]), date: dateStr_(r[3]), clockIn: String(r[4] || ''), clockOut: String(r[5] || ''),
-      hours: r[6] === '' ? null : Number(r[6]), stores: String(r[7] || ''), note: String(r[8] || ''), row: i + 2 };
-  }).filter(function (x) { return x.id; });
+  const sh = ss.getSheetByName('Shifts');
+  const values = sh.getDataRange().getValues();
+  let promoters = null;
+  const out = [];
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i];
+    let id = String(r[0] || '').trim(), pid = String(r[1] || '').trim(), pname = String(r[2] || '').trim();
+    if (!id && !pid && !pname) continue;
+    let date = r[3] instanceof Date ? dateStr_(r[3]) : String(r[3] || '').trim().slice(0, 10);
+    const cin = shiftStamp_(r[4], date);
+    if (!date && cin) date = cin.slice(0, 10);
+    const cout = shiftStamp_(r[5], date);
+    if (!id) { id = 'manual-' + (i + 1); sh.getRange(i + 1, 1).setValue(id); }
+    if (!pid || !pname) {
+      promoters = promoters || readPromoters_(ss);
+      const m = promoters.filter(function (p) { return pid ? p.id === pid : p.name.toLowerCase() === pname.toLowerCase(); })[0];
+      if (m) {
+        if (!pid) { pid = m.id; sh.getRange(i + 1, 2).setValue(pid); }
+        if (!pname) { pname = m.name; sh.getRange(i + 1, 3).setValue(pname); }
+      }
+    }
+    let hours = null;
+    if (cin && cout) {
+      let ms = parseStamp_(cout) - parseStamp_(cin);
+      if (ms < 0 && cout.slice(0, 10) === cin.slice(0, 10)) ms += 86400000; // out after midnight typed as a time only
+      hours = Math.max(0, Math.round(ms / 36000) / 100);
+      const stored = r[6] === '' || r[6] == null ? null : Number(r[6]);
+      if (stored == null || Math.abs(stored - hours) > 0.005) sh.getRange(i + 1, 7).setNumberFormat('0.00').setValue(hours);
+    }
+    out.push({ id: id, promoterId: pid, promoter: pname, date: date, clockIn: cin, clockOut: cout, hours: hours,
+      stores: String(r[7] || ''), note: String(r[8] || ''), row: i + 1 });
+  }
+  return out;
+}
+
+/* a clock-in/out cell as "yyyy-MM-dd HH:mm" ('' if empty or unreadable) */
+function shiftStamp_(v, date) {
+  if (v === '' || v == null) return '';
+  if (v instanceof Date) {
+    const d = v.getFullYear() < 1950 ? date : Utilities.formatDate(v, tz_(), 'yyyy-MM-dd'); // a time typed alone is a 1899 date
+    return d ? d + ' ' + Utilities.formatDate(v, tz_(), 'HH:mm') : '';
+  }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})/);
+  if (m) return m[1] + ' ' + ('0' + m[2]).slice(-2) + ':' + m[3];
+  m = s.match(/^(\d{1,2}):(\d{2})/);
+  if (m && date) return date + ' ' + ('0' + m[1]).slice(-2) + ':' + m[2];
+  return '';
 }
 
 function getProject_(id) {
@@ -2564,12 +2611,14 @@ function getProject_(id) {
   shifts.forEach(function (x) { if (!x.clockOut) open[x.promoterId] = x; });
   promoters.forEach(function (p) { const x = open[p.id]; p.onShift = x ? { since: x.clockIn, stores: x.stores } : null; });
   const today = nowStamp_().slice(0, 10);
-  const todayUnits = {};
+  const todayUnits = {}, todayAct = {}, todayIn = {};
   ss.getSheetByName('Results').getDataRange().getValues().slice(1).forEach(function (r) {
-    if (dateStr_(r[0]) !== today || String(r[5]) === ACTIVATED_REF) return;
-    todayUnits[String(r[1])] = (todayUnits[String(r[1])] || 0) + (Number(r[7]) || 0);
+    if (dateStr_(r[0]) !== today) return;
+    const m = String(r[5]) === ACTIVATED_REF ? todayAct : todayUnits;
+    m[String(r[1])] = (m[String(r[1])] || 0) + (Number(r[7]) || 0);
   });
-  promoters.forEach(function (p) { p.unitsToday = todayUnits[p.id] || 0; });
+  shifts.forEach(function (x) { if (x.date === today) todayIn[x.promoterId] = 1; });
+  promoters.forEach(function (p) { p.unitsToday = todayUnits[p.id] || 0; p.activatedToday = todayAct[p.id] || 0; p.workedToday = !!todayIn[p.id]; });
   return Object.assign(o.project, { promoters: promoters, locations: readLocations_(ss), products: readProducts_(ss) });
 }
 
@@ -2859,6 +2908,50 @@ function projectReport_(id) {
     shifts: shifts.slice(-60).reverse().map(function (x) { delete x.row; return x; }),
     totals: { units: list.reduce(function (a, x) { return a + x.units; }, 0), activated: list.reduce(function (a, x) { return a + x.activated; }, 0),
       hours: round2_(list.reduce(function (a, x) { return a + x.hours; }, 0)), pay: round2_(list.reduce(function (a, x) { return a + x.pay; }, 0)) }
+  };
+}
+
+/* payslip of one promoter: a row per day worked (first in, last out, hours, hourly cost, games sold, commission, total) */
+function payslip_(id, promoterId, from, to) {
+  const o = openProject_(id, false);
+  const ss = o.ss;
+  const p = readPromoters_(ss).filter(function (x) { return x.id === String(promoterId); })[0];
+  if (!p) throw userError_('Promoter not found.', 'not_found');
+  from = isIsoDate_(from) ? from : ''; to = isIsoDate_(to) ? to : '';
+  const inRange = function (d) { return d && (!from || d >= from) && (!to || d <= to); };
+  const days = {};
+  const day = function (d) { return days[d] = days[d] || { date: d, timeIn: '', timeOut: '', open: false, hours: 0, units: 0, commission: 0 }; };
+  readShifts_(ss).forEach(function (x) {
+    if (x.promoterId !== p.id || !inRange(x.date)) return;
+    const d = day(x.date);
+    if (x.clockIn && (!d.timeIn || x.clockIn < d.timeIn)) d.timeIn = x.clockIn;
+    if (!x.clockOut) d.open = true;
+    else if (!d.timeOut || x.clockOut > d.timeOut) d.timeOut = x.clockOut;
+    d.hours += x.hours || 0;
+  });
+  ss.getSheetByName('Results').getDataRange().getValues().slice(1).forEach(function (r) {
+    const date = dateStr_(r[0]);
+    if (String(r[1]) !== p.id || String(r[5]) === ACTIVATED_REF || !inRange(date)) return;
+    const n = Number(r[7]) || 0, price = Number(r[8]) || 0;
+    if (!n) return;
+    const d = day(date);
+    d.units += n;
+    d.commission += n * ((p.threshold == null ? p.commissionUnder : (price >= p.threshold ? p.commissionOver : p.commissionUnder)) || 0);
+  });
+  const rows = Object.keys(days).sort().map(function (k) {
+    const d = days[k];
+    d.hours = round2_(d.hours);
+    d.hourCost = round2_(d.hours * (p.hourlyRate || 0));
+    d.commission = round2_(d.commission);
+    d.total = round2_(d.hourCost + d.commission);
+    d.timeIn = d.timeIn.slice(11); d.timeOut = d.open ? '' : d.timeOut.slice(11);
+    return d;
+  });
+  const sum = function (k) { return round2_(rows.reduce(function (a, d) { return a + d[k]; }, 0)); };
+  return {
+    project: o.project.name, promoter: { id: p.id, name: p.name, hourlyRate: p.hourlyRate, commissionUnder: p.commissionUnder, threshold: p.threshold, commissionOver: p.commissionOver },
+    from: from, to: to, rows: rows,
+    totals: { days: rows.length, hours: sum('hours'), hourCost: sum('hourCost'), units: sum('units'), commission: sum('commission'), total: sum('total') }
   };
 }
 

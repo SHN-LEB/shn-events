@@ -112,7 +112,7 @@
     return form;
   }
 
-  var PTABS = [{ id: 'team', label: 'Promoters' }, { id: 'stores', label: 'Stores' }, { id: 'games', label: 'Games' }, { id: 'results', label: 'Results' }];
+  var PTABS = [{ id: 'team', label: 'Promoters' }, { id: 'stores', label: 'Stores' }, { id: 'games', label: 'Games' }, { id: 'day', label: 'Day summary' }, { id: 'payslips', label: 'Payslips' }];
 
   function viewProject(id, tab) {
     if (!st.project || st.project.id !== id || !st.project.promoters) {
@@ -143,7 +143,8 @@
     var el = document.getElementById('ptab');
     if (tab === 'stores') return tabStores(el, p);
     if (tab === 'games') return tabGames(el, p);
-    if (tab === 'results') return tabResults(el, p);
+    if (tab === 'day' || tab === 'results') return tabDay(el, p);
+    if (tab === 'payslips') return tabPayslips(el, p);
     return tabTeam(el, p);
   }
 
@@ -273,40 +274,98 @@
     document.getElementById('reloadG').onclick = function () { st.project = null; viewProject(p.id, 'games'); };
   }
 
-  function tabResults(el, p) {
-    if (!st.report) {
-      el.innerHTML = '<div class="loading"><div class="spinner"></div><div>Adding up results…</div></div>';
-      S.api('projectReport', { id: p.id }).then(function (res) { st.report = res.report; if (document.getElementById('ptab') === el) tabResults(el, p); })
-        .catch(function (e) { el.innerHTML = '<div class="card empty"><p class="neg">' + S.esc(e.message) + '</p></div>'; });
-      return;
-    }
-    var r = st.report, t = r.totals;
-    var tbl = function (head, rows) {
-      return '<div class="card table-wrap"><table class="tbl"><thead><tr>' + head.map(function (h) { return '<th' + (h.charAt(0) === '#' ? ' class="num"' : '') + '>' + S.esc(h.replace(/^#/, '')) + '</th>'; }).join('') +
-        '</tr></thead><tbody>' + (rows.length ? rows.join('') : '<tr><td colspan="' + head.length + '" class="muted">Nothing yet.</td></tr>') + '</tbody></table></div>';
+  /* today at a glance, sized for a phone: promoter, in/out, people activated, games sold */
+  function tabDay(el, p) {
+    var list = (p.promoters || []).filter(function (x) { return x.active || x.workedToday || x.unitsToday || x.activatedToday; })
+      .sort(function (a, b) {
+        var ra = a.onShift ? 0 : (a.workedToday ? 1 : 2), rb = b.onShift ? 0 : (b.workedToday ? 1 : 2);
+        return ra !== rb ? ra - rb : (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1);
+      });
+    var tu = 0, ta = 0, ti = 0;
+    list.forEach(function (x) { tu += x.unitsToday || 0; ta += x.activatedToday || 0; if (x.onShift) ti++; });
+    var d = new Date();
+    el.innerHTML = '<div class="ds-head"><b>' + S.esc(d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })) + '</b>' +
+      '<button class="link-btn" id="dsRefresh">Refresh</button></div>' +
+      (list.length ? '<div class="card ds-card"><table class="ds"><thead><tr><th>Promoter</th><th>Status</th><th class="num">People activated</th><th class="num">Games sold</th></tr></thead><tbody>' +
+        list.map(function (x) {
+          var since = x.onShift ? String(x.onShift.since).slice(11, 16) : '';
+          return '<tr><td><b>' + S.esc(x.name) + '</b>' + (since ? '<div class="small muted">since ' + S.esc(since) + '</div>' : '') + '</td>' +
+            '<td>' + (x.onShift ? '<span class="ds-st in">● In</span>' : '<span class="ds-st out">● Out</span>') + '</td>' +
+            '<td class="num">' + S.num(x.activatedToday || 0) + '</td><td class="num">' + S.num(x.unitsToday || 0) + '</td></tr>';
+        }).join('') + '</tbody><tfoot><tr><td>Total</td><td>' + ti + ' in</td><td class="num">' + S.num(ta) + '</td><td class="num">' + S.num(tu) + '</td></tr></tfoot></table></div>'
+        : '<div class="card empty"><p class="muted">No promoters yet.</p></div>');
+    document.getElementById('dsRefresh').onclick = function () { st.project = null; viewProject(p.id, 'day'); };
+  }
+
+  /* payslip per promoter: a row per day, totals at the bottom; Shifts edited in the sheet show here */
+  function tabPayslips(el, p) {
+    var list = (p.promoters || []).slice().sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
+    if (!list.length) { el.innerHTML = '<div class="card empty"><p class="muted">No promoters yet.</p></div>'; return; }
+    var sel = st.slip || { pid: list[0].id, from: '', to: '' };
+    if (!list.some(function (x) { return x.id === sel.pid; })) sel.pid = list[0].id;
+    st.slip = sel;
+    el.innerHTML = '<div class="card ps-filters"><div class="field"><label for="psWho">Promoter</label><select class="input" id="psWho">' +
+      list.map(function (x) { return '<option value="' + S.esc(x.id) + '"' + (x.id === sel.pid ? ' selected' : '') + '>' + S.esc(x.name) + '</option>'; }).join('') + '</select></div>' +
+      '<div class="field"><label for="psFrom">From</label><input class="input" type="date" id="psFrom" value="' + S.esc(sel.from) + '"></div>' +
+      '<div class="field"><label for="psTo">To</label><input class="input" type="date" id="psTo" value="' + S.esc(sel.to) + '"></div></div>' +
+      '<div id="psBody"><div class="loading"><div class="spinner"></div><div>Adding up…</div></div></div>' +
+      '<p class="small muted" style="margin-top:12px">To fix a forgotten clock-in or clock-out, change the time in the Shifts tab of the project sheet (or add a row with the promoter\'s name, date, clock in and clock out), then come back here.</p>';
+    var load = function () {
+      sel.pid = el.querySelector('#psWho').value; sel.from = el.querySelector('#psFrom').value; sel.to = el.querySelector('#psTo').value;
+      var body = el.querySelector('#psBody');
+      body.innerHTML = '<div class="loading"><div class="spinner"></div><div>Adding up…</div></div>';
+      S.api('payslip', { id: p.id, promoterId: sel.pid, from: sel.from, to: sel.to }).then(function (res) {
+        if (!document.body.contains(body)) return;
+        var ps = res.payslip;
+        st.slipData = ps;
+        body.innerHTML = '<div class="ps-top"><div class="small muted">' + S.esc(rateText(ps.promoter)) + '</div>' +
+          '<button class="btn btn-accent btn-sm" id="psPdf"' + (ps.rows.length ? '' : ' disabled') + '>PDF to share</button></div>' +
+          '<div class="card table-wrap">' + slipTable(ps, false) + '</div>';
+        body.querySelector('#psPdf').onclick = function () { slipPdf(ps); };
+      }).catch(function (e) { body.innerHTML = '<div class="card empty"><p class="neg">' + S.esc(e.message) + '</p></div>'; });
     };
-    el.innerHTML = '<div class="stats">' +
-      [['Units sold', S.num(t.units)], ['People activated', S.num(t.activated)], ['Hours', S.num(t.hours)], ['Pay', S.money(t.pay)]].map(function (s) {
-        return '<div class="card stat"><div class="k">' + s[0] + '</div><div class="v">' + s[1] + '</div></div>';
-      }).join('') + '</div>' +
-      '<div style="text-align:right;margin:-4px 0 6px"><button class="link-btn" id="reloadR">Refresh</button></div>' +
-      '<h2 class="section-title">Promoters</h2>' +
-      tbl(['Promoter', '#Days', '#Hours', '#Units', '#Activated', '#Hourly pay', '#Commission', '#Total pay'], r.promoters.map(function (x) {
-        return '<tr><td><b>' + S.esc(x.name) + '</b></td><td class="num">' + x.dayCount + '</td><td class="num">' + S.num(x.hours) + '</td><td class="num">' + S.num(x.units) + '</td><td class="num">' + S.num(x.activated) + '</td>' +
-          '<td class="num">' + S.money(x.hourlyPay) + '</td><td class="num">' + S.money(x.commission) + '</td><td class="num"><b>' + S.money(x.pay) + '</b></td></tr>';
-      })) +
-      '<h2 class="section-title">Stores</h2>' +
-      tbl(['Store', '#Units', '#Activated'], r.stores.map(function (x) { return '<tr><td>' + S.esc(x.store) + '</td><td class="num">' + S.num(x.units) + '</td><td class="num">' + S.num(x.activated) + '</td></tr>'; })) +
-      '<h2 class="section-title">Games</h2>' +
-      tbl(['Game', '#Units'], r.games.map(function (x) { return '<tr><td>' + S.esc(x.name) + '</td><td class="num">' + S.num(x.units) + '</td></tr>'; })) +
-      '<h2 class="section-title">Days</h2>' +
-      tbl(['Date', '#Promoters', '#Units', '#Activated'], r.days.map(function (x) { return '<tr><td>' + S.esc(x.date) + '</td><td class="num">' + x.promoters + '</td><td class="num">' + S.num(x.units) + '</td><td class="num">' + S.num(x.activated) + '</td></tr>'; })) +
-      '<h2 class="section-title">Shifts</h2>' +
-      tbl(['Promoter', 'In', 'Out', '#Hours', 'Stores', 'Note'], r.shifts.map(function (x) {
-        return '<tr><td>' + S.esc(x.promoter) + '</td><td>' + S.esc(x.clockIn) + '</td><td>' + (x.clockOut ? S.esc(x.clockOut.slice(11)) : '<span class="pill pill-live">On shift</span>') + '</td>' +
-          '<td class="num">' + (x.hours == null ? '–' : S.num(x.hours)) + '</td><td class="small">' + S.esc(x.stores) + '</td><td class="small">' + S.esc(x.note) + '</td></tr>';
-      }));
-    document.getElementById('reloadR').onclick = function () { st.report = null; tabResults(el, p); };
+    ['#psWho', '#psFrom', '#psTo'].forEach(function (q) { el.querySelector(q).onchange = load; });
+    load();
+  }
+
+  function fmtDate(d) {
+    var x = new Date(d + 'T12:00:00');
+    return isNaN(x) ? d : x.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+  }
+  function slipTable(ps, print) {
+    var m = print ? function (v) { return '$' + Number(v).toFixed(2); } : S.money;
+    var h = function (v) { return Number(v).toFixed(2); };
+    var cls = print ? 'slip' : 'tbl ps-tbl';
+    return '<table class="' + cls + '"><thead><tr><th>Day</th><th>Time in</th><th>Time out</th><th class="num">Hours</th><th class="num">Day cost</th>' +
+      '<th class="num">Games sold</th><th class="num">Commission</th><th class="num">Total</th></tr></thead><tbody>' +
+      (ps.rows.length ? ps.rows.map(function (d) {
+        return '<tr><td>' + S.esc(fmtDate(d.date)) + '</td><td>' + S.esc(d.timeIn || '–') + '</td><td>' + (d.timeOut ? S.esc(d.timeOut) : (d.open ? '<span class="' + (print ? '' : 'neg') + '">Not clocked out</span>' : '–')) + '</td>' +
+          '<td class="num">' + h(d.hours) + '</td><td class="num">' + m(d.hourCost) + '</td><td class="num">' + S.num(d.units) + '</td>' +
+          '<td class="num">' + m(d.commission) + '</td><td class="num"><b>' + m(d.total) + '</b></td></tr>';
+      }).join('') : '<tr><td colspan="8" class="muted">No days worked in this period.</td></tr>') +
+      '</tbody><tfoot><tr><td>Total (' + ps.totals.days + (ps.totals.days === 1 ? ' day' : ' days') + ')</td><td></td><td></td><td class="num">' + h(ps.totals.hours) + '</td>' +
+      '<td class="num">' + m(ps.totals.hourCost) + '</td><td class="num">' + S.num(ps.totals.units) + '</td><td class="num">' + m(ps.totals.commission) + '</td>' +
+      '<td class="num">' + m(ps.totals.total) + '</td></tr></tfoot></table>';
+  }
+
+  function slipPdf(ps) {
+    var w = window.open('', '_blank');
+    if (!w) { S.toast('Allow pop-ups for this site to make the PDF.', true); return; }
+    var period = ps.from || ps.to ? (ps.from ? fmtDate(ps.from) : 'Start') + ' – ' + (ps.to ? fmtDate(ps.to) : 'today')
+      : (ps.rows.length ? fmtDate(ps.rows[0].date) + ' – ' + fmtDate(ps.rows[ps.rows.length - 1].date) : '');
+    var logo = base() + 'assets/logo-dark.png';
+    var html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + S.esc('Payslip - ' + ps.promoter.name + ' - ' + ps.project) + '</title><style>' +
+      'body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#231F20;margin:28px;font-size:12px}h1{font-size:22px;margin:4px 0}' +
+      '.head{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #EB5C24;padding-bottom:10px;margin-bottom:14px}.head img{height:42px}.sub{color:#666}' +
+      'table{border-collapse:collapse;width:100%}td,th{padding:6px 8px;border-bottom:1px solid #e6e1da;text-align:left;white-space:nowrap}th{background:#f6f1ea;font-size:11px}' +
+      '.num{text-align:right}tfoot td{font-weight:700;border-top:2px solid #231F20;font-size:13px}tfoot td:last-child{color:#EB5C24;font-size:15px}' +
+      '.pay{margin-top:16px;font-size:15px}.pay b{font-size:20px;color:#EB5C24}@media print{body{margin:12mm}button{display:none}}</style></head><body>' +
+      '<div class="head"><div><div class="sub">SHN LEB · Promoter payslip</div><h1>' + S.esc(ps.promoter.name) + '</h1><div class="sub">' + S.esc(ps.project) + (period ? ' · ' + S.esc(period) : '') + '</div></div><img src="' + logo + '" alt="SHN"></div>' +
+      '<p class="sub">Pay: ' + S.esc(rateText(ps.promoter)) + '</p>' + slipTable(ps, true) +
+      '<p class="pay">Total pay: <b>$' + ps.totals.total.toFixed(2) + '</b></p>' +
+      '<p class="sub" style="margin-top:24px">Made ' + S.esc(new Date().toLocaleString('en-GB')) + '</p>' +
+      '<button onclick="print()" style="margin-top:10px;padding:10px 16px">Print / save as PDF</button></body></html>';
+    w.document.open(); w.document.write(html); w.document.close();
   }
 
   /* ================================================================ PROMOTER LINK (phone) */
