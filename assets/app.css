@@ -856,3 +856,11 @@ body.promo-mode .app { max-width: 900px; }
 .pm-qty b { font-size: 15px; font-variant-numeric: tabular-nums; }
 .pm-qty button { width: 32px; height: 30px; border: 0; background: none; color: #fff; font-size: 20px; font-weight: 800; line-height: 1; cursor: pointer; padding: 0; }
 .pm-tile.in-cart .pm-qty { background: rgba(235, 92, 36, .92); }
+
+/* iPhone Safari: date boxes keep their own width/height unless told otherwise */
+.ps-filters { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); }
+.ps-filters .field { min-width: 0; }
+input[type="date"].input { -webkit-appearance: none; appearance: none; display: block; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; height: 44px; min-height: 44px; line-height: normal; background: #fff; }
+input[type="date"].input::-webkit-date-and-time-value { text-align: left; margin: 0; }
+input[type="date"].input:not(:valid)::before, input[type="date"].input:invalid::before { color: var(--muted); }
+@media (max-width: 560px) { .ps-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
