@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.19.1';
+const APP_VERSION = '1.19.2';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -3257,13 +3257,20 @@ function breakevenRows_(ev) {
 /* new project from an earlier one: same games (Products) and stores (Locations, with logos). No promoters, no results. */
 function copyProjectSetup_(srcId, ss, catalogue) {
   const src = SpreadsheetApp.openById(rowToProject_(findProjectRow_(srcId).values).sheetId);
-  // only games still in the SHN Catalogue: the Products dropdown refuses any other name
+  // matched to the SHN Catalogue ignoring capitals and punctuation ("EXIT: ..." = "Exit: ...", "Spy Labs - X" = "Spy Labs: X"),
+  // and written with the catalogue's own spelling; a game that matches nothing is listed instead
+  const key = function (v) { return String(v).toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g, ' ').trim(); };
   const inCat = {};
-  (catalogue || []).forEach(function (r) { inCat[String(r[0]).trim()] = 1; });
-  const skipped = [];
-  const prods = src.getSheetByName('Products').getDataRange().getValues().slice(1)
-    .map(function (r) { return [String(r[0] || '').trim()]; })
-    .filter(function (r) { if (!r[0]) return false; if (!inCat[r[0]]) { skipped.push(r[0]); return false; } return true; });
+  (catalogue || []).forEach(function (r) { const k = key(r[0]); if (k && !inCat[k]) inCat[k] = String(r[0]).trim(); });
+  const skipped = [], seen = {};
+  const prods = [];
+  src.getSheetByName('Products').getDataRange().getValues().slice(1).forEach(function (r) {
+    const name = String(r[0] || '').trim();
+    if (!name) return;
+    const hit = inCat[key(name)];
+    if (!hit) { skipped.push(name); return; }
+    if (!seen[hit]) { seen[hit] = 1; prods.push([hit]); }
+  });
   if (prods.length) ss.getSheetByName('Products').getRange(2, 1, prods.length, 1).setValues(prods);
   const locs = readLocations_(src).map(function (l) { return [l.id, l.store, l.branch, l.logo, l.notes]; });
   if (locs.length) ss.getSheetByName('Locations').getRange(2, 1, locs.length, 5).setValues(locs);
