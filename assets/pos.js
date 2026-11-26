@@ -191,6 +191,7 @@
     refresh(pos);
     flush(pos);
     timers.push(setInterval(function () { if (current === pos) { flush(pos); } }, 20000));
+    timers.push(setInterval(function () { if (current === pos) checkHeldApprovals(pos); }, 15000));
     timers.push(setInterval(function () { if (current === pos && pos.view !== 'checkout') refresh(pos); }, 120000));
     window.addEventListener('online', onOnline);
   }
@@ -390,6 +391,8 @@
     if (pos.view === 'cash') return renderCash(pos);
     if (pos.view === 'demo') return renderDemo(pos);
     if (pos.view === 'customers') return renderCustomers(pos);
+    if (pos.view === 'opening') return renderOpening(pos);
+    if (pos.view === 'closing') return renderClosing(pos);
     document.body.classList.remove('pos-checkout');
     var d = pos.data;
     var cats = [];
@@ -404,7 +407,7 @@
       '<button class="btn btn-ghost btn-sm" id="posRecent">Recent sales</button>' +
       '<button class="btn btn-ghost btn-sm icon-only" id="posCustomer" title="Add a customer contact" aria-label="Add a customer contact">' + ICONS.person + '</button>' +
       '<button class="icon-btn btn-sm-h" id="posRefresh" title="Reload products and stock" aria-label="Refresh">' + ICONS.refresh + '<span id="syncDot"></span></button>' +
-      '</div></div>' + errorSlot(pos) +
+      '</div></div>' + dayBanner(pos) + errorSlot(pos) +
       '<div class="pos-grid">' +
       '<section class="pos-products">' +
       '<div class="pos-filters">' +
@@ -439,6 +442,7 @@
     root.querySelector('#posRecent').onclick = function () { openRecent(pos); };
     root.querySelector('#posRefresh').onclick = function () { S.toast('Refreshing…'); refresh(pos); flush(pos); };
     root.querySelector('#posCartBar').onclick = function () { openCheckout(pos); };
+    wireBanner(pos, root);
     wireErrorSlot(pos, root);
     drawTiles(pos);
     drawCart(pos);
@@ -614,7 +618,7 @@
       '<div class="field"><label for="idQty">Quantity discounted</label><input class="input money-in" id="idQty" inputmode="numeric" value="' + (editing ? line.qty : 1) + '"></div>' +
       '<div class="field"><label for="idPct">Discount %</label><input class="input money-in" id="idPct" inputmode="decimal" placeholder="0" value="' + (editing ? line.disc : '') + '"></div>' +
       '</div>' +
-      '<div class="field"><label for="idNote">Note (optional)</label><input class="input" id="idNote" placeholder="Promo code, voucher…" value="' + S.esc(line.note || '') + '"></div>' +
+      '<div class="field"><label for="idNote">Note (optional)</label><input class="input" id="idNote" placeholder="Notes for the discount" value="' + S.esc(line.note || '') + '"></div>' +
       '<label class="check"><input type="checkbox" id="idRound"' + (line.round !== false ? ' checked' : '') + '> Round down to whole $</label>' +
       '<div class="small muted" id="idPreview"></div>' +
       '<div id="idErr"></div>' +
@@ -879,17 +883,19 @@
 
   /* ---------------- sales on hold (kept on this phone) */
   function holds(pos) { return load(holdKey(pos.eventId), []); }
-  function holdSale(pos, silent) {
+  function holdSale(pos, silent, extra) {
     if (!pos.cart.length) return;
     var t = totals(pos);
     var h = holds(pos);
-    h.push({ id: 'H' + Date.now().toString(36), at: new Date().toISOString(), cart: pos.cart, discount: pos.discount, roundOrder: pos.roundOrder, note: pos.note,
-      customer: pos.customer || null, total: t.total, units: t.units });
+    var hid = 'H' + Date.now().toString(36);
+    h.push(Object.assign({ id: hid, at: new Date().toISOString(), cart: pos.cart, discount: pos.discount, roundOrder: pos.roundOrder, note: pos.note,
+      customer: pos.customer || null, total: t.total, units: t.units, seller: pos.seller || '' }, extra || {}));
     save(holdKey(pos.eventId), h);
     resetSale(pos);
     pos.view = 'products';
     render(pos);
     if (!silent) S.toast('Sale put on hold: ' + S.money(t.total) + '. Find it under On hold.');
+    return hid;
   }
   function openHolds(pos) {
     var list = holds(pos);
@@ -898,6 +904,8 @@
         var names = h.cart.map(function (l) { var p = product(pos, l.ref); return l.qty + '× ' + (p ? p.name : l.ref); });
         return '<div class="sale-row"><div class="sr-main"><b>' + S.money(h.total) + '</b> · ' + h.units + ' item' + (h.units === 1 ? '' : 's') +
           ' · held at ' + new Date(h.at).toTimeString().slice(0, 5) + (h.customer && h.customer.name ? ' · ' + S.esc(h.customer.name) : '') +
+          (h.approvalStatus ? ' <span class="pill ' + (h.approvalStatus === 'Approved' ? 'pill-live' : h.approvalStatus === 'Pending' ? 'pill-upcoming' : 'pill-closed') + '">' +
+            (h.approvalStatus === 'Pending' ? 'Waiting for the manager' : h.approvalStatus === 'Approved' ? '✓ Approved' : S.esc(h.approvalStatus)) + '</span>' : '') +
           '<div class="sr-items">' + names.map(function (n) { return '<div>' + S.esc(n) + '</div>'; }).join('') + '</div></div>' +
           '<div class="hold-actions"><button class="btn btn-primary btn-sm" data-resume="' + h.id + '">Resume</button><button class="link-btn neg" data-hdel="' + h.id + '">Delete</button></div></div>';
       }).join('') : '<p class="muted">No sales on hold. Use <b>Hold</b> at checkout to keep a sale aside while you serve someone else.</p>'));
@@ -914,6 +922,7 @@
         pos.cart = h.cart.filter(function (l) { return product(pos, l.ref); });
         pos.cart.forEach(function (l) { l.key = 'L' + (++lineSeq); });
         pos.discount = h.discount || ''; pos.roundOrder = h.roundOrder !== false; pos.note = h.note || ''; pos.customer = h.customer || null;
+        pos.approval = h.approval || ''; if (h.seller) pos.seller = h.seller;
         m.close();
         openCheckout(pos);
       };
@@ -1026,9 +1035,13 @@
     });
   }
 
-  function notesRow() {
-    return '<div class="notes">' + [1, 5, 10, 20, 50, 100].map(function (n) { return '<button class="note" data-note="' + n + '">$' + n + '</button>'; }).join('') +
-      '<button class="note clear" id="notesClear">Clear</button></div>';
+  /* banknotes to tap: a USD row and an LBP row (5K = 5,000 LBP). `kind` is 'recv' (money received) or 'ch' (change given back) */
+  var CO_USD = [1, 5, 10, 20, 50, 100], CO_LBP = [5000, 10000, 20000, 50000, 100000];
+  function notesRow(kind) {
+    return '<div class="notes notes-' + kind + '">' +
+      '<div class="notes-line">' + CO_USD.map(function (n) { return '<button class="note" data-' + kind + '-usd="' + n + '">$' + n + '</button>'; }).join('') + '</div>' +
+      '<div class="notes-line">' + CO_LBP.map(function (n) { return '<button class="note note-lbp" data-' + kind + '-lbp="' + n + '">' + (n / 1000) + 'K</button>'; }).join('') +
+      '<button class="note clear" id="' + kind + 'NotesClear">Clear</button></div></div>';
   }
 
   function renderCheckout(pos) {
@@ -1059,7 +1072,7 @@
           '<div class="cl-total">' + (lt !== gross ? '<s>' + S.money(gross) + '</s>' : '') + S.money(lt) + '</div>' +
           '<button class="pct' + (l.disc && !orderOn ? ' on' : '') + '" data-pct="' + l.key + '" aria-label="Item discount">%</button></div>';
       }).join('') +
-      '<div class="field co-note"><label for="coNote">Note</label><input class="input" id="coNote" placeholder="Promo code, voucher…" value="' + S.esc(pos.note) + '"></div>' +
+      '<div class="field co-note"><label for="coNote">Note</label><input class="input" id="coNote" placeholder="Notes for the discount" value="' + S.esc(pos.note) + '"></div>' +
       '</section>' +
 
       '<section class="co-card co-total"><button class="pct-total" id="coOrderDisc" aria-label="Discount on the whole sale" title="Discount on the whole sale">%</button>' +
@@ -1075,13 +1088,13 @@
       '<div class="two">' +
       '<div class="field cashf"><label for="payUsd">Received USD</label><input class="input money-in" id="payUsd" inputmode="decimal" placeholder="0" value="' + S.esc(pay.recvUsd) + '"></div>' +
       '<div class="field cashf"><label for="payLbp">Received LBP</label><input class="input money-in" id="payLbp" inputmode="numeric" placeholder="0" value="' + S.esc(pay.recvLbp) + '"></div>' +
-      '</div>' + notesRow() +
+      '</div>' + notesRow('recv') +
       '<div class="pay-status" id="payStatus"></div>' +
       '<div class="two">' +
       '<div class="field cashf"><label for="chUsd">Change given USD</label><input class="input money-in" id="chUsd" inputmode="numeric" placeholder="0" value="' + S.esc(pay.changeUsd) + '"></div>' +
       '<div class="field cashf"><label for="chLbp">Change given LBP</label><input class="input money-in" id="chLbp" inputmode="numeric" placeholder="0" value="' + S.esc(pay.changeLbp) + '"></div>' +
-      '</div>' +
-      '<div class="small muted cashf-hint">LBP change is rounded to ' + S.num(d.lbpStep || 5000) + '.</div>' +
+      '</div>' + notesRow('ch') +
+      '<div class="small muted cashf-hint">LBP change is rounded to ' + S.num(d.lbpStep || 5000) + '. Tap the notes you hand back.</div>' +
       '</section>' +
 
       '<section class="co-card"><h3>Sold by <span class="req">required</span></h3>' +
@@ -1131,14 +1144,31 @@
     $('#payOnline').oninput = function () { pay.online = this.value; update(pos); };
     $('#payUsd').oninput = function () { pay.recvUsd = this.value; update(pos); };
     liveCommas($('#payLbp'), function (v) { pay.recvLbp = v; update(pos); });
-    Array.prototype.forEach.call(root.querySelectorAll('[data-note]'), function (b) {
+    // money received: each tap adds the note to that currency
+    Array.prototype.forEach.call(root.querySelectorAll('[data-recv-usd]'), function (b) {
       b.onclick = function () {
-        pay.recvUsd = String(r2(parseNum(pay.recvUsd) + Number(b.getAttribute('data-note'))));
-        $('#payUsd').value = pay.recvUsd;
-        update(pos);
+        pay.recvUsd = String(r2(parseNum(pay.recvUsd) + Number(b.getAttribute('data-recv-usd'))));
+        $('#payUsd').value = pay.recvUsd; update(pos);
       };
     });
-    $('#notesClear').onclick = function () { pay.recvUsd = ''; $('#payUsd').value = ''; update(pos); };
+    Array.prototype.forEach.call(root.querySelectorAll('[data-recv-lbp]'), function (b) {
+      b.onclick = function () {
+        pay.recvLbp = fmtLbpInput(parseNum(pay.recvLbp) + Number(b.getAttribute('data-recv-lbp')));
+        $('#payLbp').value = pay.recvLbp; update(pos);
+      };
+    });
+    $('#recvNotesClear').onclick = function () { pay.recvUsd = ''; pay.recvLbp = ''; $('#payUsd').value = ''; $('#payLbp').value = ''; update(pos); };
+    // change given back: the notes handed over, each currency on its own
+    var chTapped = false;
+    var chNote = function (cur, n) {
+      if (!chTapped) { pay.changeUsd = ''; pay.changeLbp = ''; chTapped = true; } // first tap replaces the suggested split
+      if (cur === 'usd') pay.changeUsd = String(Math.round(parseNum(pay.changeUsd) + n));
+      else pay.changeLbp = fmtLbpInput(parseNum(pay.changeLbp) + n);
+      $('#chUsd').value = pay.changeUsd; $('#chLbp').value = pay.changeLbp; clearErr();
+    };
+    Array.prototype.forEach.call(root.querySelectorAll('[data-ch-usd]'), function (b) { b.onclick = function () { chNote('usd', Number(b.getAttribute('data-ch-usd'))); }; });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-ch-lbp]'), function (b) { b.onclick = function () { chNote('lbp', Number(b.getAttribute('data-ch-lbp'))); }; });
+    $('#chNotesClear').onclick = function () { pay.changeUsd = ''; pay.changeLbp = ''; $('#chUsd').value = ''; $('#chLbp').value = ''; chTapped = true; clearErr(); };
     pairFields(root, '#chUsd', '#chLbp', function () { return calc(pos).change; }, function () { return pos.data.fxRate; },
       function () { return pos.data.lbpStep || 5000; }, function (u, l) { pay.changeUsd = u; pay.changeLbp = l; clearErr(); });
     keepAboveKeyboard(root);
@@ -1193,14 +1223,28 @@
       return Array.prototype.map.call(new Uint8Array(buf), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
     }).catch(function () { return null; });
   }
-  function askManagerPin(pos, reason, onOk) {
+  /* `ask` = { kind: 'Discount' | 'Return', amount, by }: lets staff send the request to the manager's portal instead of the PIN */
+  function askManagerPin(pos, reason, onOk, ask) {
     var pin = '';
     var m = modal('<div class="pay-head"><h2>Manager PIN</h2><button class="link-btn" data-close>Cancel</button></div>' +
       '<p class="muted" style="margin-top:0">' + S.esc(reason) + '</p><div id="mpErr"></div>' +
       '<div class="pin-dots" id="mpDots"><span></span><span></span><span></span><span></span></div>' +
       '<div class="keypad">' + [1, 2, 3, 4, 5, 6, 7, 8, 9, '', 0, '⌫'].map(function (k) {
         return k === '' ? '<span></span>' : '<button type="button" class="key" data-k="' + k + '">' + k + '</button>';
-      }).join('') + '</div>');
+      }).join('') + '</div>' +
+      (ask ? '<div class="ap-or"><span>Manager not here?</span><button class="btn btn-primary btn-block" id="mpAsk">Ask a manager to approve</button></div>' : ''));
+    var askBtn = m.el.querySelector('#mpAsk');
+    if (askBtn) askBtn.onclick = function () {
+      askBtn.disabled = true; askBtn.textContent = 'Sending…';
+      var rid = 'APR' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      req(pos, 'requestApproval', { approval: { id: rid, kind: ask.kind, reason: reason, amount: ask.amount, by: ask.by || '' } }).then(function () {
+        m.close();
+        waitForApproval(pos, rid, ask, onOk);
+      }).catch(function (err) {
+        askBtn.disabled = false; askBtn.textContent = 'Ask a manager to approve';
+        m.el.querySelector('#mpErr').innerHTML = '<div class="form-error">' + S.esc(err.offline ? 'No connection: the request needs internet.' : err.message) + '</div>';
+      });
+    };
     function draw() { Array.prototype.forEach.call(m.el.querySelectorAll('#mpDots span'), function (d, i) { d.className = i < pin.length ? 'on' : ''; }); }
     function press(k) {
       if (k === '⌫') pin = pin.slice(0, -1); else if (pin.length < 4) pin += k;
@@ -1218,6 +1262,68 @@
       }
     }
     Array.prototype.forEach.call(m.el.querySelectorAll('.key'), function (b) { b.onclick = function () { press(b.getAttribute('data-k')); }; });
+  }
+
+  /* waiting for the manager: the phone asks every 5 s. A sale can be put on hold meanwhile (it is approved in the background). */
+  function aprKey(id) { return 'shn-apr-' + id; }
+  function waitForApproval(pos, rid, ask, onOk) {
+    var stopped = false;
+    var m = modal('<div class="pay-head"><h2>Waiting for a manager</h2><button class="link-btn" data-close>Cancel</button></div>' +
+      '<div class="ap-wait" id="apWait"><div class="spinner"></div><p>Request sent. A manager approves it from the portal (🔔).</p></div>' +
+      (ask.kind === 'Discount' ? '<button class="btn btn-ghost btn-block" id="apHold">Put the sale on hold and keep selling</button>' : ''), function () { stopped = true; });
+    var hb = m.el.querySelector('#apHold');
+    if (hb) hb.onclick = function () {
+      stopped = true;
+      var list = load(aprKey(pos.eventId), []);
+      var holdId = holdSale(pos, true, { approvalId: rid, approvalStatus: 'Pending' });
+      list.push({ id: rid, holdId: holdId });
+      save(aprKey(pos.eventId), list);
+      m.close();
+      S.toast('Sale on hold. You will see here when the manager answers.');
+    };
+    function tick() {
+      if (stopped) return;
+      req(pos, 'approvalStatus', { ids: [rid] }).then(function (res) {
+        if (stopped) return;
+        var st = (res.approvals && res.approvals[0] || {}).status;
+        if (st === 'Approved') { stopped = true; m.close(); S.toast('Approved by the manager.'); onOk('APPROVAL:' + rid); return; }
+        if (st === 'Declined' || st === 'Expired') {
+          stopped = true;
+          m.el.querySelector('#apWait').innerHTML = '<div class="cash-res bad">✗ ' + (st === 'Declined' ? 'Declined by the manager.' : 'The request expired.') + '</div>' +
+            '<p class="muted">Change the discount or the return, or ask again.</p>';
+          if (hb) hb.remove();
+          return;
+        }
+        setTimeout(tick, 5000);
+      }).catch(function () { setTimeout(tick, 8000); });
+    }
+    setTimeout(tick, 4000);
+  }
+  /* sales on hold waiting for an approval: checked in the background */
+  function checkHeldApprovals(pos) {
+    var list = load(aprKey(pos.eventId), []);
+    if (!list.length) return;
+    req(pos, 'approvalStatus', { ids: list.map(function (x) { return x.id; }) }).then(function (res) {
+      var by = {};
+      (res.approvals || []).forEach(function (a) { by[a.id] = a.status; });
+      var left = [];
+      list.forEach(function (x) {
+        var st = by[x.id];
+        if (!st || st === 'Pending') { left.push(x); return; }
+        var h = holds(pos);
+        h.forEach(function (y) {
+          if (y.id !== x.holdId) return;
+          y.approvalStatus = st;
+          if (st === 'Approved') y.approval = 'APPROVAL:' + x.id;
+        });
+        save(holdKey(pos.eventId), h);
+        var hh = h.filter(function (y) { return y.id === x.holdId; })[0];
+        S.toast(st === 'Approved' ? 'Manager approved the sale on hold' + (hh ? ' (' + S.money(hh.total) + ')' : '') + '. Open On hold to finish it.'
+          : 'Manager ' + st.toLowerCase() + ' the sale on hold' + (hh ? ' (' + S.money(hh.total) + ')' : '') + '.', st !== 'Approved');
+        if (pos.view === 'products') render(pos);
+      });
+      save(aprKey(pos.eventId), left);
+    }).catch(function () { /* next time */ });
   }
 
   function cardLink() { return (window.SHN_CONFIG && window.SHN_CONFIG.CARD_PAY_LINK) || ''; }
@@ -1330,7 +1436,8 @@
     var box = pos.el.querySelector('#payError');
     if (err) { box.innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; box.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
     if (needsPin && !pos.approval) {
-      askManagerPin(pos, 'This sale has a ' + S.num(t.maxDisc) + '% discount, above the ' + S.num(pos.data.maxDiscountPct) + '% max.', function (p2) { pos.approval = p2; confirmSale(pos); });
+      askManagerPin(pos, 'This sale has a ' + S.num(t.maxDisc) + '% discount, above the ' + S.num(pos.data.maxDiscountPct) + '% max.', function (p2) { pos.approval = p2; confirmSale(pos); },
+        { kind: 'Discount', amount: t.total, by: pos.seller });
       return;
     }
     var customer = pos.customer;
@@ -1454,7 +1561,7 @@
       if (limit > 0 && due > limit) {
         if (!r.approval) {
           var btn = this;
-          askManagerPin(pos, 'Returns above ' + S.money(limit) + ' need the manager PIN.', function (p2) { r.approval = p2; btn.click(); });
+          askManagerPin(pos, 'Return of ' + S.money(due) + ' (above ' + S.money(limit) + ').', function (p2) { r.approval = p2; btn.click(); }, { kind: 'Return', amount: due, by: '' });
           return;
         }
         ret.approval = r.approval;
@@ -1503,9 +1610,19 @@
         var dir = b.getAttribute('data-in') ? 'in' : 'out';
         if (dir === 'out' && !window.confirm('Clock out ' + name + '?')) return;
         var noteEl = Array.prototype.filter.call(box.querySelectorAll('[data-note-for]'), function (x) { return x.getAttribute('data-note-for') === name; })[0];
+        var dayBefore = dayNow(pos);
         enqueue(pos, { qid: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'clock', name: name, direction: dir,
           clientTime: new Date().toISOString(), note: noteEl ? noteEl.value.trim() : '' });
+        // the first clock-in of the day opens the day
+        if (dir === 'in' && !dayBefore.open) {
+          enqueue(pos, { qid: 'D' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'day',
+            day: { action: 'open', by: name, notes: '', clientTime: new Date().toISOString() } });
+        }
         if (dir === 'out' && pos.seller === name) pos.seller = '';
+        // the last one out: offer to close the day
+        if (dir === 'out' && dayBefore.open && !Object.keys(openShiftNames(pos)).length && pos.view !== 'closing' && !pos.admin) {
+          setTimeout(function () { if (window.confirm('Nobody is clocked in now. Close the day?')) { pos.flow = 'closing'; go(pos, 'closing'); } }, 300);
+        }
         S.toast(name + (dir === 'in' ? ' clocked in.' : ' clocked out.'));
         flush(pos);
         after(name, dir);
@@ -1540,23 +1657,162 @@
   function go(pos, view) { pos.view = view; render(pos); window.scrollTo(0, 0); }
 
   function pageTop(pos, title, right) {
-    return '<div class="co-top"><button class="btn btn-ghost btn-sm" data-home>‹ Home</button><h2 class="page-title">' + S.esc(title) + '</h2>' + (right || '<span></span>') + '</div>';
+    var back = pos.flow ? '‹ ' + (pos.flow === 'opening' ? 'Open the day' : 'Close the day') : '‹ Home';
+    return '<div class="co-top"><button class="btn btn-ghost btn-sm" data-home>' + back + '</button><h2 class="page-title">' + S.esc(title) + '</h2>' + (right || '<span></span>') + '</div>' +
+      (pos.flow ? '' : dayBanner(pos));
   }
   function wireTop(pos, root) {
-    Array.prototype.forEach.call(root.querySelectorAll('[data-home]'), function (b) { b.onclick = function () { go(pos, 'home'); }; });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-home]'), function (b) { b.onclick = function () { backFromStep(pos); }; });
+    wireBanner(pos, root);
+  }
+  /* after a count started from the Open / Close the day checklist, go back to it */
+  function backFromStep(pos) { go(pos, pos.flow || 'home'); }
+
+  /* ---------------- opening and closing the day */
+  /* red banner on every page while the open day still misses its opening counts */
+  function dayBanner(pos) {
+    if (!pos.data || pos.preview) return '';
+    var d = dayNow(pos);
+    if (!d.open) return '';
+    var miss = [];
+    if (!d.opening.cash) miss.push(['cash', 'count the cash']);
+    if (!d.opening.stock) miss.push(['count', 'count the stock']);
+    if (!miss.length) return '';
+    return '<div class="day-banner"><b>Day not fully opened:</b> ' + miss.map(function (m) {
+      return '<button class="link-btn" data-dayfix="' + m[0] + '">' + m[1] + '</button>';
+    }).join(' · ') + '</div>';
+  }
+  function wireBanner(pos, root) {
+    Array.prototype.forEach.call(root.querySelectorAll('[data-dayfix]'), function (b) {
+      b.onclick = function () { pos.flow = 'opening'; go(pos, b.getAttribute('data-dayfix')); };
+    });
+  }
+  function anyoneIn(pos) { return Object.keys(openShiftNames(pos)).length > 0; }
+
+  /* Open the day: 1 clock in (this opens the day: selling can start), 2 count the cash, 3 count the stock */
+  function renderOpening(pos) {
+    document.body.classList.remove('pos-checkout');
+    var root = pos.el.querySelector('#pos');
+    var d = dayNow(pos);
+    var inNow = d.open; // the first clock-in opens the day
+    var steps = [
+      ['clock', 'Clock in', inNow ? 'Done: the day is open, you can sell.' : 'Clocking in opens the day.', inNow],
+      ['cash', 'Count the cash', d.open && d.opening.cash ? 'Done.' : 'Count the drawer before or between sales.', d.open && d.opening.cash],
+      ['count', 'Count the stock', d.open && d.opening.stock ? 'Done.' : 'Count every game on the stand.', d.open && d.opening.stock]
+    ];
+    var allDone = steps.every(function (x) { return x[3]; });
+    root.innerHTML = '<div class="co day-flow">' +
+      '<h2 class="pm-title">Open day ' + (d.open ? d.number : d.next) + '</h2>' +
+      '<p class="muted center small">' + (allDone ? 'All done. Have a good day!' : 'Do the steps in this order.') + '</p>' +
+      steps.map(function (x, i) {
+        return '<button class="df-step' + (x[3] ? ' done' : '') + '" data-step="' + x[0] + '"' + (i > 0 && !inNow ? ' disabled' : '') + '>' +
+          '<span class="df-n">' + (x[3] ? '✓' : i + 1) + '</span><span class="df-t"><b>' + x[1] + '</b><span>' + x[2] + '</span></span><i>›</i></button>';
+      }).join('') +
+      '<button class="btn btn-accent btn-big btn-block" id="dfGo"' + (inNow ? '' : ' disabled') + ' style="margin-top:14px">' + (allDone ? 'Go to home' : 'Start selling') + '</button>' +
+      (inNow && !allDone ? '<p class="small muted center" style="margin-top:8px">A red banner reminds you of the counts still to do.</p>' : '') +
+      '</div>';
+    Array.prototype.forEach.call(root.querySelectorAll('[data-step]'), function (b) {
+      b.onclick = function () {
+        var k = b.getAttribute('data-step');
+        if (k === 'clock') return openStaff(pos, function () { renderOpening(pos); });
+        pos.flow = 'opening'; go(pos, k);
+      };
+    });
+    root.querySelector('#dfGo').onclick = function () { pos.flow = null; go(pos, 'home'); };
+  }
+
+  /* Close the day: the morning's steps in reverse (stock, cash, clock out), in any order; what is skipped is flagged in the report */
+  function renderClosing(pos) {
+    document.body.classList.remove('pos-checkout');
+    var root = pos.el.querySelector('#pos');
+    var d = dayNow(pos);
+    if (!d.open) { pos.flow = null; return go(pos, 'home'); }
+    var stillIn = Object.keys(openShiftNames(pos));
+    var who = pos.closeBy || '';
+    var steps = [
+      ['count', 'Count the stock', d.closing.stock],
+      ['cash', 'Count the cash', d.closing.cash],
+      ['out', 'Clock everyone out', !stillIn.length]
+    ];
+    var skipped = [];
+    if (!d.closing.stock) skipped.push('closing stock count');
+    if (!d.closing.cash) skipped.push('closing cash count');
+    if (!d.opening.stock) skipped.push('opening stock count');
+    if (!d.opening.cash) skipped.push('opening cash count');
+    root.innerHTML = '<div class="co day-flow">' +
+      '<div class="co-top"><button class="btn btn-ghost btn-sm" id="dfBack">‹ Home</button><h2 class="page-title">Close day ' + d.number + '</h2><span></span></div>' +
+      steps.map(function (x, i) {
+        var sub = x[2] ? 'Done.' : x[0] === 'out' ? S.esc(stillIn.join(', ')) + (stillIn.length === 1 ? ' is' : ' are') + ' still clocked in.' : 'Not done yet.';
+        return '<button class="df-step' + (x[2] ? ' done' : '') + '" data-cstep="' + x[0] + '"><span class="df-n">' + (x[2] ? '✓' : i + 1) + '</span>' +
+          '<span class="df-t"><b>' + x[1] + '</b><span>' + sub + '</span></span><i>›</i></button>';
+      }).join('') +
+      '<section class="co-card" style="margin-top:14px"><h3>Who is closing the day?</h3><div class="sellers">' + pos.data.staff.map(function (n) {
+        return '<button class="seller' + (who === n ? ' active' : '') + '" data-closer="' + S.esc(n) + '">' + S.esc(n) + '</button>';
+      }).join('') + '</div>' +
+      '<div class="field" style="margin-top:12px"><label for="dayNotes">Notes for the day (optional)</label><textarea class="input" id="dayNotes" rows="3" placeholder="Weather, crowd, what sold, problems, what to bring tomorrow…">' + S.esc(pos.closeNotes || '') + '</textarea></div></section>' +
+      (skipped.length ? '<div class="pay-status owed"><span>Not done: <b>' + S.esc(skipped.join(', ')) + '</b>. You can still close the day; it will be flagged in the report.</span></div>' : '') +
+      '<div id="dayErr"></div><button class="btn btn-accent btn-big btn-block" id="dayGo">' + (skipped.length || stillIn.length ? 'Close day anyway' : 'Close day') + '</button></div>';
+    root.querySelector('#dfBack').onclick = function () { pos.flow = null; go(pos, 'home'); };
+    root.querySelector('#dayNotes').oninput = function () { pos.closeNotes = this.value; };
+    Array.prototype.forEach.call(root.querySelectorAll('[data-closer]'), function (b) {
+      b.onclick = function () { pos.closeBy = b.getAttribute('data-closer'); renderClosing(pos); };
+    });
+    Array.prototype.forEach.call(root.querySelectorAll('[data-cstep]'), function (b) {
+      b.onclick = function () {
+        var k = b.getAttribute('data-cstep');
+        if (k !== 'out') { pos.flow = 'closing'; return go(pos, k); }
+        if (!stillIn.length) return;
+        if (!window.confirm('Clock out ' + stillIn.join(', ') + ' now?')) return;
+        var t = new Date().toISOString();
+        stillIn.forEach(function (n) {
+          enqueue(pos, { qid: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'clock', name: n, direction: 'out', clientTime: t, note: 'Clocked out at Close day' });
+        });
+        flush(pos);
+        S.toast('Clocked out: ' + stillIn.join(', ') + '.');
+        renderClosing(pos);
+      };
+    });
+    root.querySelector('#dayGo').onclick = function () {
+      if (!pos.closeBy) { root.querySelector('#dayErr').innerHTML = '<div class="form-error">Tap your name.</div>'; return; }
+      var also = stillIn.length ? stillIn.join(', ') + ' will stay clocked in. ' : '';
+      if ((skipped.length || stillIn.length) && !window.confirm(also + (skipped.length ? 'Not done: ' + skipped.join(', ') + '. ' : '') + 'Close the day anyway?')) return;
+      var who2 = pos.closeBy, dayNo = d.number;
+      saveDemo(pos, who2, true); sendRefills(pos, who2); drop('shn-countdraft-' + pos.eventId); pos.countState = null; // demo counter + refill requests go with the day, then reset
+      enqueue(pos, { qid: 'D' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type: 'day',
+        day: { action: 'close', by: who2, notes: (pos.closeNotes || '').trim(), skipped: skipped.concat(stillIn.length ? ['clock-out of ' + stillIn.join(', ')] : []),
+          clientTime: new Date().toISOString() } });
+      pos.flow = null; pos.closeBy = ''; pos.closeNotes = '';
+      go(pos, 'home');
+      flush(pos);
+      var m2 = modal('<div class="pay-head"><h2>Day ' + dayNo + ' closed</h2><button class="link-btn" data-close>Done</button></div>' +
+        '<p class="muted" style="margin-top:0">The report is in the event sheet (Days tab). Share the day\'s summary with the team:</p>' +
+        '<button class="btn btn-accent btn-big btn-block" id="shareDay">Share summary on WhatsApp</button>');
+      m2.el.querySelector('#shareDay').onclick = function () {
+        var b = this; b.disabled = true; b.textContent = 'Preparing…';
+        waitQueue(pos, 15000).then(function () {
+          return shareSummary({ eventId: pos.eventId, token: pos.token, day: dayNo });
+        }).then(function () { m2.close(); }, function () { b.disabled = false; b.textContent = 'Share summary on WhatsApp'; });
+      };
+    };
   }
 
   /* day state as the server knows it, plus what is still waiting on this phone */
   function dayNow(pos) {
     var d = JSON.parse(JSON.stringify(pos.data.day || { open: false, number: 0, next: 1, counts: {} }));
     d.counts = d.counts || {};
+    // older servers only send `counts` (closing counts when open, opening counts when not)
+    d.opening = d.opening || (d.open ? { cash: true, stock: true } : { cash: !!d.counts.cash, stock: !!d.counts.stock });
+    d.closing = d.closing || (d.open ? { cash: !!d.counts.cash, stock: !!d.counts.stock } : {});
     queue(pos).forEach(function (x) {
       if (x.error) return;
-      if (x.type === 'day' && x.day.action === 'open' && !d.open) { d.open = true; d.number = d.next; d.countsFor = 'Closing'; d.openedAt = x.day.clientTime; d.counts = {}; }
-      if (x.type === 'day' && x.day.action === 'close' && d.open) { d.open = false; d.next = d.number + 1; d.countsFor = 'Opening'; d.counts = {}; }
-      if (x.type === 'count' && x.count.purpose === (d.open ? 'Closing' : 'Opening')) d.counts.stock = true;
-      if (x.type === 'cash' && x.cash.kind === 'count' && x.cash.purpose === (d.open ? 'Closing' : 'Opening')) d.counts.cash = true;
+      if (x.type === 'day' && x.day.action === 'open' && !d.open) { d.open = true; d.number = d.next; d.countsFor = 'Closing'; d.openedAt = x.day.clientTime; d.closing = {}; }
+      if (x.type === 'day' && x.day.action === 'close' && d.open) { d.open = false; d.next = d.number + 1; d.countsFor = 'Opening'; d.opening = {}; d.closing = {}; }
+      var pur = x.type === 'count' ? x.count.purpose : x.type === 'cash' && x.cash.kind === 'count' ? x.cash.purpose : '';
+      var k = x.type === 'count' ? 'stock' : 'cash';
+      if (pur === 'Opening') d.opening[k] = true;
+      if (pur === 'Closing' && d.open) d.closing[k] = true;
     });
+    d.counts = d.open ? d.closing : d.opening;
     return d;
   }
 
@@ -1591,6 +1847,9 @@
     document.body.classList.remove('pos-checkout');
     var root = pos.el.querySelector('#pos');
     var d = dayNow(pos);
+    pos.flow = null;
+    // the day isn't open yet: the Open the day checklist comes first
+    if (!d.open && !pos.preview && !pos.skipOpening) { pos.view = 'opening'; return renderOpening(pos); }
     var when = function (v) { return v ? (String(v).indexOf('T') > 0 ? new Date(v).toTimeString().slice(0, 5) : String(v).slice(11, 16)) : ''; };
     var mark = function (ok) { return ok ? '<span class="ok">✓</span>' : '<span class="no">–</span>'; };
     var cash = expectedNow(pos), warn = pos.data.cashWarn || {};
@@ -1601,7 +1860,8 @@
       '<div class="day-strip' + (d.open ? ' open' : '') + '">' +
       '<div class="ds-main"><b>' + (d.open ? 'Day ' + d.number + ' open since ' + when(d.openedAt) : 'Day not started') + '</b>' +
       '<div class="small">' + (d.open ? 'Closing counts' : 'Opening counts') + ': cash ' + mark(d.counts.cash) + ' · stock ' + mark(d.counts.stock) + '</div></div>' +
-      '<button class="btn ' + (d.open ? 'btn-ghost' : 'btn-primary') + ' btn-sm" id="dayBtn">' + (d.open ? 'Close day' : 'Start day') + '</button></div>' +
+      '<button class="btn ' + (d.open ? 'btn-ghost' : 'btn-primary') + ' btn-sm" id="dayBtn">' + (d.open ? 'Close day' : 'Open the day') + '</button></div>' +
+      dayBanner(pos) +
       (tooMuch ? '<div class="cash-warn"><b>Too much cash in the drawer.</b> Ask your manager to collect it, then submit a handover in Cash count.</div>' : '') +
       errorSlot(pos) +
       '<div class="home-grid">' +
@@ -1615,7 +1875,8 @@
     Array.prototype.forEach.call(root.querySelectorAll('[data-go]'), function (b) {
       b.onclick = function () { var v = b.getAttribute('data-go'); go(pos, v === 'pos' ? 'products' : v); };
     });
-    root.querySelector('#dayBtn').onclick = function () { openDayDialog(pos); };
+    root.querySelector('#dayBtn').onclick = function () { pos.flow = d.open ? 'closing' : null; pos.skipOpening = false; go(pos, d.open ? 'closing' : 'opening'); };
+    wireBanner(pos, root);
     wireErrorSlot(pos, root);
     drawSync(pos);
   }
@@ -1707,14 +1968,15 @@
   }
 
   /* ---------------- purpose of a count */
-  function purposeHtml(pos, current) {
-    var d = dayNow(pos);
-    if (!d.open) return '<div class="purpose"><span class="pill pill-upcoming">Opening count</span> <span class="small muted">Before Start day</span></div>';
+  /* a count is the day's opening count until it has one (cash and stock each), then a spot check or the closing count */
+  function isOpeningCount(pos, kind) { var d = dayNow(pos); return !d.open || !d.opening[kind]; }
+  function purposeHtml(pos, current, kind) {
+    if (isOpeningCount(pos, kind)) return '<div class="purpose"><span class="pill pill-upcoming">Opening count</span> <span class="small muted">Part of opening the day</span></div>';
     return '<div class="seg seg2" id="purposeSeg">' + [['Spot', 'Spot check'], ['Closing', 'Closing count']].map(function (x) {
       return '<button data-purpose="' + x[0] + '" class="' + (current === x[0] ? 'active' : '') + '">' + x[1] + '</button>';
     }).join('') + '</div>';
   }
-  function purposeOf(pos, chosen) { return dayNow(pos).open ? (chosen || 'Spot') : 'Opening'; }
+  function purposeOf(pos, chosen, kind) { return isOpeningCount(pos, kind) ? 'Opening' : (chosen || 'Spot'); }
   function wirePurpose(root, st) {
     Array.prototype.forEach.call(root.querySelectorAll('[data-purpose]'), function (b) {
       b.onclick = function () {
@@ -1725,46 +1987,91 @@
   }
 
   /* ---------------- stock count page */
+  /* several people can count together: tap each name */
+  function multiPicker(pos, selected, id) {
+    var open = openShiftNames(pos);
+    var names = pos.data.staff.filter(function (n) { return open[n]; });
+    return '<div class="sellers" id="' + id + '">' + names.map(function (n) {
+      return '<button class="seller' + (selected.indexOf(n) >= 0 ? ' active' : '') + '" data-mpick="' + S.esc(n) + '">' + (selected.indexOf(n) >= 0 ? '✓ ' : '') + S.esc(n) + '</button>';
+    }).join('') + '<button class="seller add" data-mclockin>+ Clock in</button></div>' +
+      (names.length ? '<div class="small muted" style="margin-top:6px">Tap everyone who counted.</div>' : '<div class="small muted" style="margin-top:6px">Nobody is clocked in yet.</div>');
+  }
+
+  /* Stock count. Blind: no expected numbers while counting. "Check for variances" filters to the games that don't match
+     (red border on the box that's off, no amounts), up to 3 times; after the 3rd check the differences show, those boxes lock
+     and a note can be written. The first count and the final count are both saved. The count never changes the system stock. */
+  var MAX_CHECKS = 3;
   function renderCount(pos) {
     var root = pos.el.querySelector('#pos');
-    var st = pos.countState = pos.countState || load('shn-countdraft-' + pos.eventId, null) || { purpose: 'Spot', by: '', values: {} };
+    var st = pos.countState = pos.countState || load('shn-countdraft-' + pos.eventId, null) || {};
+    st.values = st.values || {}; st.purpose = pos.flow === 'closing' ? 'Closing' : (st.purpose || 'Spot'); st.checks = st.checks || 0; st.notes = st.notes || {};
+    if (!Array.isArray(st.by)) st.by = st.by ? [st.by] : [];
     var refills = load(refillKey(pos.eventId), {});
     var pend = pendingQty(pos);
     var prods = pos.data.products;
+    var flags = st.flags || null; // { ref: { s: true, d: true } } after a check
+    var revealed = st.checks >= MAX_CHECKS;
+    var filtering = !!flags && !st.showAll;
+    var nFlag = flags ? Object.keys(flags).length : 0;
+    var expS = function (p) { return p.live - (pend[p.ref] || 0); };
+    var diffTxt = function (n) { return (n > 0 ? '+' : '') + n; };
+    var banner = '';
+    if (flags) {
+      banner = nFlag
+        ? '<div class="ct-banner bad"><b>' + nFlag + (nFlag === 1 ? ' game doesn\'t' : ' games don\'t') + ' match.</b> ' +
+          (revealed ? 'The differences are shown and the counts are locked. Write a note on what is wrong, then save.'
+            : 'Count ' + (nFlag === 1 ? 'it' : 'them') + ' again (red box), then press Check again. Check ' + st.checks + ' of ' + MAX_CHECKS + '.') + '</div>'
+        : '<div class="ct-banner ok"><b>✓ Everything you counted matches.</b> Save the count.</div>';
+    }
     root.innerHTML = '<div class="co count-page">' + pageTop(pos, 'Stock count') +
-      '<section class="co-card">' + purposeHtml(pos, st.purpose) +
-      '<div class="count-tools"><button class="btn btn-ghost" id="countScan">' + ICONS.scan + ' Scan</button></div></section>' +
-      '<section class="co-card"><table class="count-tbl"><thead><tr><th>Product</th><th>Sellable</th><th>Demo</th><th>Variance</th><th>Refill</th></tr></thead><tbody>' +
+      '<section class="co-card">' + purposeHtml(pos, st.purpose, 'stock') +
+      '<div class="count-tools"><button class="btn btn-ghost" id="countScan">' + ICONS.scan + ' Scan</button>' +
+      (flags ? '<button class="link-btn" id="ctAll">' + (st.showAll ? 'Show only the games to recount' : 'Show all games') + '</button>' : '') + '</div></section>' +
+      banner +
+      '<section class="co-card"><table class="count-tbl"><thead><tr><th>Product</th><th>Stock</th><th>Demo</th><th>Refill</th></tr></thead><tbody>' +
       prods.map(function (p, i) {
-        var v = st.values[p.ref] || {};
+        var v = st.values[p.ref] || {}, f = flags && flags[p.ref];
+        var hide = filtering && !f;
+        var lock = revealed && !!f;
         var rq = refills[p.ref];
-        return '<tr data-ref="' + S.esc(p.ref) + '"><td class="ct-name">' + S.esc(p.name) + '</td>' +
-          '<td><input class="input ct-in" data-k="s" data-i="' + i + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(v.s == null ? '' : v.s) + '"></td>' +
-          '<td>' + (p.demo ? '<input class="input ct-in" data-k="d" data-i="' + i + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(v.d == null ? '' : v.d) + '">' : '<span class="muted small">–</span>') + '</td>' +
-          '<td class="ct-mark"></td>' +
+        var box = function (k, val, on) {
+          var cls = 'input ct-in' + (f && f[k] ? ' ct-red' : '');
+          return '<input class="' + cls + '" data-k="' + k + '" data-i="' + i + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(val == null ? '' : val) + '"' + (lock ? ' disabled' : '') + '>' +
+            (lock && f[k] ? '<div class="ct-diff">' + diffTxt(Number(val) - (k === 's' ? expS(p) : (p.demo || 0))) + '</div>' : '');
+        };
+        return '<tr data-ref="' + S.esc(p.ref) + '"' + (hide ? ' hidden' : '') + '><td class="ct-name">' + S.esc(p.name) +
+          (lock ? '<input class="input ct-note" data-note="' + S.esc(p.ref) + '" placeholder="What is wrong?" value="' + S.esc(st.notes[p.ref] || '') + '">' : '') + '</td>' +
+          '<td>' + box('s', v.s, true) + '</td>' +
+          '<td>' + (p.demo ? box('d', v.d, true) : '<span class="muted small">–</span>') + '</td>' +
           '<td><input class="input ct-in rf" data-rf="' + S.esc(p.ref) + '" inputmode="numeric" enterkeyhint="next" value="' + S.esc(rq ? rq : '') + '" aria-label="Refill quantity"></td></tr>';
       }).join('') + '</tbody></table>' +
-      '<p class="small muted" style="margin:8px 0 0">Refill: how many more you need. Kept on this phone and sent to your manager when the day is closed.</p></section>' +
-      '<section class="co-card"><h3>Counted by <span class="req">required</span></h3><div id="countWho">' + namePicker(pos, st.by, 'countNames') + '</div></section>' +
-      '<div id="countErr"></div><button class="btn btn-accent btn-big btn-block" id="countSave">Save count</button></div>';
+      '<p class="small muted" style="margin:8px 0 0">Stock: the boxes you count on the stand (not the demo units). Refill: how many more you need, sent to your manager when the day is closed.</p></section>' +
+      '<section class="co-card"><h3>Counted by <span class="req">required</span></h3><div id="countWho">' + multiPicker(pos, st.by, 'countNames') + '</div></section>' +
+      '<div id="countErr"></div>' +
+      (revealed ? '' : '<button class="btn btn-ghost btn-big btn-block" id="countCheck">' + (flags ? 'Check again' : 'Check for variances') + '</button>') +
+      '<button class="btn btn-accent btn-big btn-block" id="countSave" style="margin-top:10px">Save count</button></div>';
     wireTop(pos, root);
     wirePurpose(root, st);
-    function wireWho() { wirePicker(pos, root, function (n) { st.by = n; keep(); }, function () { root.querySelector('#countWho').innerHTML = namePicker(pos, st.by, 'countNames'); wireWho(); }); }
-    wireWho();
-    var inputs = Array.prototype.slice.call(root.querySelectorAll('.ct-in'));
     function keep() { save('shn-countdraft-' + pos.eventId, st); }
-    function mark(tr) {
-      var ref = tr.getAttribute('data-ref');
-      var p = product(pos, ref), v = st.values[ref] || {};
-      var cell = tr.querySelector('.ct-mark');
-      var parts = [];
-      var expS = p.live - (pend[ref] || 0), expD = p.demo || 0;
-      if (v.s !== undefined && v.s !== '') { var ds = Number(v.s) - expS; parts.push(ds === 0 ? '' : (ds > 0 ? '+' : '') + ds); }
-      if (v.d !== undefined && v.d !== '') { var dd = Number(v.d) - expD; parts.push(dd === 0 ? '' : 'demo ' + (dd > 0 ? '+' : '') + dd); }
-      if (!parts.length) { cell.innerHTML = ''; return; }
-      var bad = parts.filter(Boolean);
-      cell.innerHTML = bad.length ? '<span class="ct-bad">✗ ' + S.esc(bad.join(' · ')) + '</span>' : '<span class="ct-ok">✓</span>';
+    function wireWho() {
+      Array.prototype.forEach.call(root.querySelectorAll('[data-mpick]'), function (b) {
+        b.onclick = function () {
+          var n = b.getAttribute('data-mpick'), i = st.by.indexOf(n);
+          if (i >= 0) st.by.splice(i, 1); else st.by.push(n);
+          keep();
+          root.querySelector('#countWho').innerHTML = multiPicker(pos, st.by, 'countNames'); wireWho();
+        };
+      });
+      var c = root.querySelector('[data-mclockin]');
+      if (c) c.onclick = function () {
+        openStaff(pos, function (name, dir) {
+          if (dir === 'in' && st.by.indexOf(name) < 0) st.by.push(name);
+          keep(); root.querySelector('#countWho').innerHTML = multiPicker(pos, st.by, 'countNames'); wireWho();
+        });
+      };
     }
+    wireWho();
+    var inputs = Array.prototype.slice.call(root.querySelectorAll('.ct-in:not([disabled])'));
     inputs.forEach(function (inp, k) {
       inp.addEventListener('input', function () {
         var tr = inp.closest('tr'), ref = tr.getAttribute('data-ref');
@@ -1778,18 +2085,26 @@
         st.values[ref] = st.values[ref] || {};
         st.values[ref][inp.getAttribute('data-k')] = inp.value;
         keep();
-        mark(tr);
       });
       inp.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); var next = inputs[k + 1]; if (next) { next.focus(); next.select(); } else inp.blur(); }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          var next = inputs.slice(k + 1).filter(function (x) { return !x.closest('tr').hidden; })[0];
+          if (next) { next.focus(); next.select(); } else inp.blur();
+        }
       });
     });
-    Array.prototype.forEach.call(root.querySelectorAll('tbody tr'), mark);
+    Array.prototype.forEach.call(root.querySelectorAll('[data-note]'), function (inp) {
+      inp.addEventListener('input', function () { st.notes[inp.getAttribute('data-note')] = inp.value.slice(0, 200); keep(); });
+    });
     keepAboveKeyboard(root);
+    var all = root.querySelector('#ctAll');
+    if (all) all.onclick = function () { st.showAll = !st.showAll; keep(); renderCount(pos); };
     root.querySelector('#countScan').onclick = function () {
       openScanner(pos, { title: 'Scan to count', count: {
         get: function (ref) { return st.values[ref] || {}; },
         set: function (ref, v) {
+          if (revealed && flags && flags[ref]) { S.toast('This game is locked after 3 checks.', true); return; }
           st.values[ref] = st.values[ref] || {};
           st.values[ref].s = v.s;
           if (v.d !== undefined) st.values[ref].d = v.d;
@@ -1798,13 +2113,13 @@
           if (tr) {
             var si = tr.querySelector('[data-k="s"]'), di = tr.querySelector('[data-k="d"]');
             if (si) si.value = v.s; if (di && v.d !== undefined) di.value = v.d;
-            mark(tr);
           }
         },
         done: function (ref) {
           setTimeout(function () {
             var tr = row(ref);
             if (!tr) return;
+            tr.hidden = false;
             tr.scrollIntoView({ block: 'center' });
             tr.classList.add('flash');
             setTimeout(function () { tr.classList.remove('flash'); }, 1500);
@@ -1813,20 +2128,50 @@
       } }, null);
     };
     function row(ref) { return root.querySelector('tr[data-ref="' + (window.CSS && CSS.escape ? CSS.escape(ref) : ref) + '"]'); }
+    function counted() {
+      return Object.keys(st.values).filter(function (ref) {
+        var v = st.values[ref]; return (v.s !== '' && v.s != null) || (v.d !== '' && v.d != null);
+      });
+    }
+    var chk = root.querySelector('#countCheck');
+    if (chk) chk.onclick = function () {
+      var refs = counted();
+      if (!refs.length) { root.querySelector('#countErr').innerHTML = '<div class="form-error">Enter at least one quantity first.</div>'; return; }
+      if (!st.first) { // the first count, kept as it was typed
+        st.first = {};
+        refs.forEach(function (ref) { st.first[ref] = { s: st.values[ref].s, d: st.values[ref].d }; });
+      }
+      var f = {};
+      refs.forEach(function (ref) {
+        var p = product(pos, ref), v = st.values[ref];
+        if (!p) return;
+        var bad = {};
+        if (v.s !== '' && v.s != null && Number(v.s) !== expS(p)) bad.s = true;
+        if (v.d !== '' && v.d != null && Number(v.d) !== (p.demo || 0)) bad.d = true;
+        if (bad.s || bad.d) f[ref] = bad;
+      });
+      st.flags = f; st.checks += 1; st.showAll = false;
+      keep();
+      renderCount(pos);
+      window.scrollTo(0, 0);
+    };
     root.querySelector('#countSave').onclick = function () {
-      var lines = Object.keys(st.values).map(function (ref) {
-        var v = st.values[ref];
-        return { ref: ref, sellable: v.s === '' || v.s == null ? '' : Number(v.s), demo: v.d === '' || v.d == null ? '' : Number(v.d) };
-      }).filter(function (l) { return l.sellable !== '' || l.demo !== ''; });
-      var err = !lines.length ? 'Enter at least one quantity.' : !st.by ? 'Pick who counted.' : '';
+      var refs = counted();
+      var lines = refs.map(function (ref) {
+        var v = st.values[ref], fr = (st.first && st.first[ref]) || null;
+        var num = function (x) { return x === '' || x == null ? '' : Number(x); };
+        return { ref: ref, sellable: num(v.s), demo: num(v.d),
+          firstSellable: fr ? num(fr.s) : '', firstDemo: fr ? num(fr.d) : '', note: st.notes[ref] || '' };
+      });
+      var err = !lines.length ? 'Enter at least one quantity.' : !st.by.length ? 'Tap who counted.' : '';
       if (err) { root.querySelector('#countErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
-      var off = Array.prototype.filter.call(root.querySelectorAll('.ct-bad'), function () { return true; }).length;
-      var count = { id: 'K' + newSaleId().slice(1), countedBy: st.by, purpose: purposeOf(pos, st.purpose), lines: lines, clientTime: new Date().toISOString() };
+      var count = { id: 'K' + newSaleId().slice(1), countedBy: st.by.join(', '), purpose: purposeOf(pos, st.purpose, 'stock'), lines: lines, checks: st.checks,
+        clientTime: new Date().toISOString() };
       enqueue(pos, { qid: count.id, type: 'count', count: count });
       pos.countState = null;
       drop('shn-countdraft-' + pos.eventId);
-      S.toast('Count saved: ' + lines.length + ' product' + (lines.length === 1 ? '' : 's') + (off ? ', ' + off + ' with a variance.' : ', all correct.'));
-      go(pos, 'home');
+      S.toast('Count saved: ' + lines.length + ' product' + (lines.length === 1 ? '' : 's') + '.');
+      backFromStep(pos);
       flush(pos);
     };
   }
@@ -1837,7 +2182,7 @@
 
   function renderCash(pos) {
     var root = pos.el.querySelector('#pos');
-    var st = pos.cashState = pos.cashState || { purpose: 'Spot', by: '', usd: {}, lbp: {}, result: null };
+    var st = pos.cashState = pos.cashState || { purpose: pos.flow === 'closing' ? 'Closing' : 'Spot', by: '', usd: {}, lbp: {}, result: null };
     function rows(cur, notes) {
       return notes.map(function (n) {
         var q = st[cur][n] || '';
@@ -1847,7 +2192,7 @@
       }).join('');
     }
     root.innerHTML = '<div class="co cash-page">' + pageTop(pos, 'Cash count') +
-      '<section class="co-card">' + purposeHtml(pos, st.purpose) +
+      '<section class="co-card">' + purposeHtml(pos, st.purpose, 'cash') +
       '<button class="btn btn-ghost btn-block" id="handoverBtn" style="margin-top:10px">Submit a handover</button></section>' +
       '<section class="co-card"><div class="cash-cols">' +
       '<div><h3>USD</h3><table class="count-tbl cn-tbl"><tbody>' + rows('usd', USD_NOTES) + '</tbody></table><div class="cn-total">Total <b id="totUsd"></b></div></div>' +
@@ -1894,7 +2239,7 @@
       var t = totals2();
       var exp = expectedNow(pos);
       var du = r2(t.usd - exp.usd), dl = t.lbp - exp.lbp;
-      var cash = { id: 'M' + newSaleId().slice(1), kind: 'count', by: st.by, usd: t.usd, lbp: t.lbp, purpose: purposeOf(pos, st.purpose),
+      var cash = { id: 'M' + newSaleId().slice(1), kind: 'count', by: st.by, usd: t.usd, lbp: t.lbp, purpose: purposeOf(pos, st.purpose, 'cash'),
         banknotes: { usd: st.usd, lbp: st.lbp }, clientTime: new Date().toISOString() };
       enqueue(pos, { qid: cash.id, type: 'cash', cash: cash });
       flush(pos);
@@ -1903,7 +2248,8 @@
         ? '<div class="cash-res good">✓ Correct</div>'
         : '<div class="cash-res bad">✗ Variance: ' + [du ? 'USD ' + (du > 0 ? '+' : '−') + S.money(Math.abs(du)) : '', dl ? 'LBP ' + (dl > 0 ? '+' : '−') + S.num(Math.abs(dl)) : ''].filter(Boolean).join(' · ') + '</div>';
       root.querySelector('#cashSave').textContent = 'Saved. Back to home';
-      root.querySelector('#cashSave').onclick = function () { pos.cashState = null; go(pos, 'home'); };
+      root.querySelector('#cashSave').textContent = pos.flow ? 'Saved. Back to ' + (pos.flow === 'opening' ? 'Open the day' : 'Close the day') : 'Saved. Back to home';
+      root.querySelector('#cashSave').onclick = function () { pos.cashState = null; backFromStep(pos); };
     };
   }
 
@@ -1940,6 +2286,12 @@
       var usd = parseNum($('#hoUsd').value), l = Math.round(parseNum($('#hoLbp').value)), name = $('#hoTo').value.trim();
       var err = !usd && !l ? (mode === 'out' ? 'Enter the amount handed over.' : 'Enter the amount added.')
         : !name ? (mode === 'out' ? 'Who collected the cash?' : 'Who brought the cash?') : mode === 'in' && !who ? 'Pick who received it.' : '';
+      // can't take out more than the drawer holds (checked per currency; the amount in the drawer is not shown, as for cash counts)
+      if (!err && mode === 'out') {
+        var e = expectedNow(pos);
+        var overU = usd > Math.max(0, e.usd) + 0.009, overL = l > Math.max(0, e.lbp);
+        if (overU || overL) err = 'That is more ' + (overU && overL ? 'USD and LBP' : overU ? 'USD' : 'LBP') + ' than there is in the drawer. Count the cash and check the amount.';
+      }
       if (err) { $('#hoErr').innerHTML = '<div class="form-error">' + S.esc(err) + '</div>'; return; }
       var cash;
       if (mode === 'out') {
@@ -1970,29 +2322,50 @@
   }
 
   /* ---------------- demo counter: plays per demo game + customers activated, kept on this phone until saved */
+  /* Demo counter: the day's running totals stay on screen; what is new since the last send goes to the sheet by itself
+     (a few seconds after the taps stop, and at Close day). It starts again at zero only when the day is closed. */
   function demoState(pos) {
     var d = load(demoKey(pos.eventId), null) || { plays: {}, customers: 0 };
+    d.sent = d.sent || { plays: {}, customers: 0 };
     d.total = Object.keys(d.plays).reduce(function (a, k) { return a + (d.plays[k] || 0); }, 0);
     return d;
   }
-  function setDemo(pos, d) { save(demoKey(pos.eventId), { plays: d.plays, customers: d.customers }); }
-  function saveDemo(pos, by, silent) {
+  function setDemo(pos, d) { save(demoKey(pos.eventId), { plays: d.plays, customers: d.customers, sent: d.sent }); }
+  function saveDemo(pos, by, endOfDay) {
     var d = demoState(pos);
-    if (!d.total && !d.customers) return false;
-    var entry = { id: 'G' + newSaleId().slice(1), by: by || '', plays: d.plays, customers: d.customers, clientTime: new Date().toISOString() };
-    enqueue(pos, { qid: entry.id, type: 'demo', demo: entry });
-    drop(demoKey(pos.eventId));
-    if (!silent) S.toast('Demo counter saved: ' + d.total + ' plays, ' + d.customers + ' customers activated.');
-    return true;
+    var delta = {}, any = false;
+    var refs = {};
+    Object.keys(d.plays).concat(Object.keys(d.sent.plays)).forEach(function (r) { refs[r] = 1; });
+    Object.keys(refs).forEach(function (r) {
+      var n = (d.plays[r] || 0) - (d.sent.plays[r] || 0);
+      if (n) { delta[r] = n; any = true; }
+    });
+    var cust = (d.customers || 0) - (d.sent.customers || 0);
+    if (cust) any = true;
+    if (any) {
+      var entry = { id: 'G' + newSaleId().slice(1), by: by || '', plays: delta, customers: cust, clientTime: new Date().toISOString() };
+      enqueue(pos, { qid: entry.id, type: 'demo', demo: entry });
+      d.sent = { plays: JSON.parse(JSON.stringify(d.plays)), customers: d.customers };
+    }
+    if (endOfDay) drop(demoKey(pos.eventId)); else setDemo(pos, d);
+    return any;
+  }
+  var demoTimer = null;
+  function demoSoon(pos) {
+    clearTimeout(demoTimer);
+    demoTimer = setTimeout(function () {
+      var open = openShiftNames(pos);
+      if (saveDemo(pos, pos.data.staff.filter(function (n) { return open[n]; }).join(', '))) flush(pos);
+    }, 8000);
   }
   function renderDemo(pos) {
     var root = pos.el.querySelector('#pos');
     var demos = pos.data.products.filter(function (p) { return p.demo > 0; });
     var d = demoState(pos);
-    root.innerHTML = '<div class="co demo-page">' + pageTop(pos, 'Demo counter', '<button class="btn btn-ghost btn-sm" id="demoSave">Save</button>') +
+    root.innerHTML = '<div class="co demo-page">' + pageTop(pos, 'Demo counter') +
       '<section class="co-card demo-cust"><div><b>Customers activated</b><div class="small muted">People who played a game</div></div>' +
       '<div class="qty big-qty"><button id="custDec" aria-label="One less">−</button><span id="custN">' + d.customers + '</span><button id="custInc" aria-label="One more">+</button></div></section>' +
-      (demos.length ? '<p class="small muted">Tap a game each time it is played. Counts stay on this phone until the day is closed (or you press Save).</p>' +
+      (demos.length ? '<p class="small muted">Tap a game each time it is played. Today\'s counts are saved by themselves.</p>' +
         '<div class="tiles demo-tiles">' + demos.map(function (p) {
           var pic = picUrl(p.picture), n = d.plays[p.ref] || 0;
           return '<div class="tile demo-tile' + (n ? ' in-cart' : '') + '" data-ref="' + S.esc(p.ref) + '" role="button" tabindex="0"><span class="tile-img">' + (pic
@@ -2010,6 +2383,7 @@
       if (!s2.plays[ref]) delete s2.plays[ref];
       setDemo(pos, s2);
       if (navigator.vibrate && delta > 0) navigator.vibrate(25);
+      demoSoon(pos);
       renderDemo(pos);
     }
     var tiles = root.querySelector('.demo-tiles');
@@ -2019,15 +2393,9 @@
       var t = e.target.closest('.demo-tile');
       if (t) bump(t.getAttribute('data-ref'), 1);
     };
-    function cust(delta) { var s2 = demoState(pos); s2.customers = Math.max(0, (s2.customers || 0) + delta); setDemo(pos, s2); root.querySelector('#custN').textContent = s2.customers; }
+    function cust(delta) { var s2 = demoState(pos); s2.customers = Math.max(0, (s2.customers || 0) + delta); setDemo(pos, s2); root.querySelector('#custN').textContent = s2.customers; demoSoon(pos); }
     root.querySelector('#custInc').onclick = function () { cust(1); if (navigator.vibrate) navigator.vibrate(25); };
     root.querySelector('#custDec').onclick = function () { cust(-1); };
-    root.querySelector('#demoSave').onclick = function () {
-      var open = openShiftNames(pos);
-      if (!saveDemo(pos, pos.data.staff.filter(function (n) { return open[n]; }).join(', '))) { S.toast('Nothing to save yet.'); return; }
-      flush(pos);
-      renderDemo(pos);
-    };
   }
 
   /* ---------------- customers page */

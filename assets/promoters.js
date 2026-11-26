@@ -288,14 +288,15 @@
   function tabStores(el, p) {
     var list = p.locations || [];
     el.innerHTML = '<div class="page-head" style="margin-bottom:10px"><h2 class="section-title" style="margin:0">Stores</h2><button class="btn btn-accent btn-sm" id="addLc">+ Add store</button></div>' +
-      (list.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>ID</th><th>Store</th><th>Location / branch</th><th>Logo</th><th>Notes</th><th></th></tr></thead><tbody>' +
+      (list.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>ID</th><th>Store</th><th>Location / branch</th><th>Games shown</th><th>Logo</th><th>Notes</th><th></th></tr></thead><tbody>' +
         list.map(function (l) {
           return '<tr><td class="muted">' + S.esc(l.id) + '</td><td><b>' + S.esc(l.store) + '</b></td><td>' + S.esc(l.branch) + '</td>' +
+            '<td class="small">' + (l.listed ? '<b>' + l.listed + '</b> (account list)' : '<span class="muted">All games</span>') + '</td>' +
             '<td>' + (l.logo ? '<img class="lc-logo" src="' + S.esc(l.logo) + '" alt="">' : '<span class="muted">–</span>') + '</td><td class="small">' + S.esc(l.notes) + '</td>' +
             '<td><button class="link-btn" data-lc="' + S.esc(l.id) + '">Edit</button></td></tr>';
         }).join('') + '</tbody></table></div>'
         : '<div class="card empty"><p class="muted">No stores yet. Add the stores where promoters work: promoters pick them when they clock in.</p></div>') +
-      '<p class="small muted" style="margin-top:12px">Stores can also be typed in the Locations tab of the project sheet.</p>';
+      '<p class="small muted" style="margin-top:12px">Stores can also be typed in the Locations tab of the project sheet. To show only some games at an account, list them in the <b>Accounts Listings</b> tab: every branch of that account uses the same list.</p>';
     // the picture chosen in the dialog is uploaded after the store is saved
     function wireLogo(box) {
       var picked = { data: null };
@@ -348,6 +349,9 @@
     var issues = (iss.unmatched.length ? '<div class="card pg-warn"><b>' + iss.unmatched.length + (iss.unmatched.length === 1 ? ' game is' : ' games are') +
         ' not in the SHN Catalogue</b> <span class="small">so ' + (iss.unmatched.length === 1 ? 'it has' : 'they have') + ' no Ref code and promoters don\'t see ' + (iss.unmatched.length === 1 ? 'it' : 'them') + '. ' + (iss.unmatched.length === 1 ? 'It is' : 'They are') + ' red in the Products tab: pick the right name from the dropdown.</span><ul>' +
         iss.unmatched.map(function (x) { return '<li><b>' + S.esc(x.name) + '</b> <span class="small muted">(row ' + x.row + ')</span>' + (x.suggestion ? ' <span class="small">closest: ' + S.esc(x.suggestion) + '</span>' : '') + '</li>'; }).join('') + '</ul></div>' : '') +
+      (iss.listing && iss.listing.length ? '<div class="card pg-warn"><b>Accounts Listings: ' + iss.listing.length + (iss.listing.length === 1 ? ' game is' : ' games are') +
+        ' not in this project\'s games</b> <span class="small">so they don\'t show. Add them to Products, or pick another name.</span><ul>' +
+        iss.listing.map(function (x) { return '<li><b>' + S.esc(x.name) + '</b> <span class="small muted">(' + S.esc(x.account) + ', row ' + x.row + ')</span></li>'; }).join('') + '</ul></div>' : '') +
       (iss.fixed.length ? '<div class="card pg-ok"><b>Fixed automatically</b> <span class="small">(same game, different spelling)</span><ul>' +
         iss.fixed.map(function (x) { return '<li>' + S.esc(x.from) + ' → <b>' + S.esc(x.to) + '</b></li>'; }).join('') + '</ul></div>' : '');
     el.innerHTML = issues + '<div class="note">Pick the games in the <b>Products</b> tab of the project sheet: choose each one from the dropdown in column A (Ref, price and category fill in by themselves). Then reload this page.</div>' +
@@ -826,7 +830,10 @@
     var here = s.segments.length ? s.segments[s.segments.length - 1] : null;
     var c = counts(s, s.active);
     var fav = favs();
-    var prods = (P.data.products || []).slice().sort(function (a, b) {
+    // a store whose account has a list in Accounts Listings shows only those games
+    var activeLoc = locs.filter(function (l) { return l.id === s.active; })[0] || {};
+    var only = activeLoc.games && activeLoc.games.length ? activeLoc.games : null;
+    var prods = (P.data.products || []).filter(function (p) { return !only || only.indexOf(p.ref) >= 0; }).sort(function (a, b) {
       var fa = fav[a.ref] ? 0 : 1, fb = fav[b.ref] ? 0 : 1;
       if (fa !== fb) return fa - fb;
       return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1;

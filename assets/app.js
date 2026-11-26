@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.16.0';
+  var APP_VERSION = '1.21.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var DRAFT_TABS = [
@@ -139,10 +139,71 @@
     if (location.hash === hash) render(); else location.hash = hash;
   }
 
+  /* ---------------- manager approvals: requests from the staff links, checked every 30 s while the portal is open */
+  var approvals = { pending: [], recent: [] }, apTimer = null, baseTitle = document.title;
+  function pollApprovals() {
+    if (!getToken() || staffEvent || promoLink) return;
+    api('listApprovals', {}, { quiet: true }).then(function (res) { approvals = res.approvals || approvals; drawBell(); }).catch(function () { /* next time */ });
+  }
+  function drawBell() {
+    var n = approvals.pending.length;
+    var b = document.getElementById('topBell');
+    if (b) { b.classList.toggle('has', n > 0); b.querySelector('b').textContent = n ? String(n) : ''; }
+    document.title = (n ? '(' + n + ') ' : '') + baseTitle;
+    var panel = document.getElementById('apPanel');
+    if (panel) panel.innerHTML = approvalsHtml();
+    if (panel) wireApprovals(panel);
+  }
+  function approvalsHtml() {
+    var p = approvals.pending, r = approvals.recent;
+    var row = function (x, live) {
+      return '<div class="ap-row' + (live ? ' live' : '') + '"><div class="ap-main"><b>' + esc(x.kind === 'Return' ? 'Return' : 'Discount') + ' · ' + money(x.amount) + '</b> <span class="small muted">' + esc(x.event) + '</span>' +
+        '<div>' + esc(x.reason) + '</div><div class="small muted">Asked by ' + esc(x.by || '–') + ' at ' + esc(String(x.at).slice(11, 16)) + (live ? '' : ' · ' + esc(x.status) + (x.decidedAt ? ' at ' + esc(String(x.decidedAt).slice(11, 16)) : '')) + '</div></div>' +
+        (live ? '<div class="ap-btns"><button class="btn btn-ghost btn-sm" data-ap-no="' + esc(x.id) + '">Decline</button><button class="btn btn-accent btn-sm" data-ap-yes="' + esc(x.id) + '">Approve</button></div>' : '') + '</div>';
+    };
+    return (p.length ? p.map(function (x) { return row(x, true); }).join('') : '<p class="muted">No request waiting.</p>') +
+      (r.length ? '<h3 class="rs-title" style="margin-top:16px">Recent</h3>' + r.map(function (x) { return row(x, false); }).join('') : '');
+  }
+  function wireApprovals(box) {
+    Array.prototype.forEach.call(box.querySelectorAll('[data-ap-yes],[data-ap-no]'), function (b) {
+      b.onclick = function () {
+        var idv = b.getAttribute('data-ap-yes') || b.getAttribute('data-ap-no');
+        var yes = !!b.getAttribute('data-ap-yes');
+        b.disabled = true;
+        api('decideApproval', { id: idv, decision: yes ? 'Approved' : 'Declined' }).then(function (res) {
+          approvals = res.approvals; drawBell(); toast(yes ? 'Approved.' : 'Declined.');
+        }).catch(function (e) { b.disabled = false; toast(e.message, true); pollApprovals(); });
+      };
+    });
+  }
+  function openApprovals() {
+    var wrap = document.createElement('div');
+    wrap.className = 'dialog-backdrop';
+    wrap.innerHTML = '<div class="card dialog ap-dialog"><div class="ap-head"><h2>Manager approvals</h2><button class="link-btn" data-x>Close</button></div>' +
+      '<p class="small muted" style="margin-top:0">Requests from the staff links instead of the manager PIN. A request still waiting when the day closes expires.</p>' +
+      '<div id="apPanel">' + approvalsHtml() + '</div></div>';
+    document.body.appendChild(wrap);
+    var close = function () { wrap.remove(); };
+    wrap.querySelector('[data-x]').onclick = close;
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) close(); });
+    wireApprovals(wrap);
+    pollApprovals();
+  }
+
   function setTopbar() {
+    var master = '';
+    try { master = localStorage.getItem('shn-master-url') || ''; } catch (e) { master = ''; }
     topbarRight.innerHTML = getToken()
-      ? '<button class="topbar-refresh" id="topRefresh" aria-label="Refresh" title="Read the Google Sheets again">↻</button><button class="link-btn" id="signOut">Sign out</button>'
+      ? (master ? '<a class="topbar-master" href="' + esc(master) + '" target="_blank" rel="noopener" title="Open the master Google Sheet">Master sheet</a>' : '') +
+        '<button class="topbar-bell" id="topBell" aria-label="Manager approvals" title="Manager approvals">🔔<b></b></button>' +
+        '<button class="topbar-refresh" id="topRefresh" aria-label="Refresh" title="Read the Google Sheets again">↻</button><button class="link-btn" id="signOut">Sign out</button>'
       : '';
+    var bell = document.getElementById('topBell');
+    if (bell) {
+      bell.onclick = openApprovals;
+      drawBell();
+      if (!apTimer) { apTimer = setInterval(pollApprovals, 30000); pollApprovals(); }
+    }
     var rf = document.getElementById('topRefresh');
     if (rf) rf.onclick = function () {
       rf.classList.add('spin');
@@ -154,6 +215,7 @@
     var b = document.getElementById('signOut');
     if (b) b.onclick = function () {
       setToken(null); state.events = null; if (window.SHN_PROMO) window.SHN_PROMO.reset();
+      clearInterval(apTimer); apTimer = null; approvals = { pending: [], recent: [] }; document.title = baseTitle;
       try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf('shn-cache-') === 0) localStorage.removeItem(k); }); } catch (e) { /* ignore */ }
       go('#/login');
     };
@@ -186,6 +248,7 @@
       api('adminLogin', { password: document.getElementById('pw').value })
         .then(function (res) {
           setToken(res.token, res.expires);
+          if (res.masterUrl) try { localStorage.setItem('shn-master-url', res.masterUrl); } catch (e) { /* ignore */ }
           go('#/');
         })
         .catch(function (err) {
@@ -202,6 +265,7 @@
       var cached = null;
       try { cached = JSON.parse(localStorage.getItem('shn-cache-events') || 'null'); } catch (e) { cached = null; }
       var fetch = api('listEvents').then(function (res) {
+        if (res.masterUrl) try { localStorage.setItem('shn-master-url', res.masterUrl); } catch (e) { /* ignore */ }
         var fresh = JSON.stringify(res.events || []);
         try { localStorage.setItem('shn-cache-events', fresh); } catch (e) { /* full */ }
         if (!cached || JSON.stringify(cached) !== fresh) {
@@ -1441,6 +1505,7 @@
             '<td class="num">' + (d.sales === '' ? '–' : money(d.sales)) + '<div class="pref">' + (d.units === '' ? '' : num(d.units) + ' units') + '</div></td>' +
             '<td class="num">' + (d.demoPlays === '' ? '–' : num(d.demoPlays)) + '</td><td class="num">' + (d.customersActivated === '' ? '–' : num(d.customersActivated)) + '</td>' +
             '<td><button class="btn btn-ghost btn-sm" data-share-day="' + esc(d.day) + '">Share</button></td></tr>' +
+            (d.skipped ? '<tr class="day-note day-skip"><td colspan="13"><b>⚠ Skipped at close' + (d.closedBy ? ' (closed by ' + esc(d.closedBy) + ')' : '') + ':</b> ' + esc(d.skipped) + '</td></tr>' : '') +
             (d.notes ? '<tr class="day-note"><td colspan="13"><span class="pref">Notes:</span> ' + esc(d.notes) + '</td></tr>' : '');
         }).join('') + '</tbody></table></div>' +
         '<p class="small muted">Differences compare counted with expected. "Change during day" is the difference that appeared between that day\'s opening and closing counts: a non-zero value points to the day a variance happened.</p>'
