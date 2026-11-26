@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.18.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -146,7 +146,12 @@ function setup() {
   ensureMasterTabs_(master);
   protectMaster_(master);
   listProjects_().forEach(function (p) {
-    try { const pss = SpreadsheetApp.openById(p.sheetId); readPromoters_(pss); protectProject_(pss); } catch (e) { Logger.log('Could not protect project ' + p.name + ': ' + e); }
+    try {
+      const pss = SpreadsheetApp.openById(p.sheetId);
+      readPromoters_(pss); protectProject_(pss);
+      const want = projectSheetName_(p.createdDate || nowStamp_().slice(0, 10), p.name);
+      if (pss.getName() !== want) pss.rename(want);
+    } catch (e) { Logger.log('Could not protect project ' + p.name + ': ' + e); }
   });
   // lock the protected ranges of every event sheet already made, and add its Info and Break-even tabs
   listEvents_().forEach(function (ev) {
@@ -2430,7 +2435,8 @@ function projectsSheet_() { return master_().getSheetByName('Projects'); }
 
 function rowToProject_(r) {
   return { id: String(r[0]), name: String(r[1]), status: String(r[2] || 'Open'), sheetUrl: String(r[3] || ''), sheetId: String(r[4] || ''),
-    createdAt: r[5] instanceof Date ? r[5].toISOString() : String(r[5] || '') };
+    createdAt: r[5] instanceof Date ? r[5].toISOString() : String(r[5] || ''),
+    createdDate: r[5] instanceof Date ? dateStr_(r[5]) : String(r[5] || '').slice(0, 10) };
 }
 
 function listProjects_() {
@@ -2462,7 +2468,7 @@ function createProject_(name, copyFrom) {
     let folder;
     try { folder = DriveApp.getFolderById(folderId); } catch (e) { throw userError_('Could not open the promoters folder. Check PROJECTS_FOLDER_ID in the master Settings.', 'folder'); }
     const catalogue = loadCatalogue_();
-    const ss = SpreadsheetApp.create('SHN LEB Promoters — ' + name);
+    const ss = SpreadsheetApp.create(projectSheetName_(nowStamp_().slice(0, 10), name));
     DriveApp.getFileById(ss.getId()).moveTo(folder);
     buildProjectSheet_(ss, catalogue);
     if (copyFrom) copyProjectSetup_(copyFrom, ss);
@@ -3231,5 +3237,10 @@ function lastStores_(ss, pid) {
     return hay.indexOf(', ' + l.store + (l.branch ? ' (' + l.branch + ')' : '') + ', ') >= 0;
   }).map(function (l) { return l.id; });
   return ids.length ? { date: last.date, locations: ids } : null;
+}
+
+/* "20261126 - Spinneys Christmas", like the event sheets (date the project was created) */
+function projectSheetName_(isoDate, name) {
+  return String(isoDate).replace(/-/g, '').slice(0, 8) + ' - ' + name;
 }
 
