@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.19.0';
+const APP_VERSION = '1.19.1';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -273,7 +273,7 @@ function route_(req) {
     case 'pnl': requireAdmin_(req); return { pnl: pnl_(req.id, req.writeSheet !== false) };
     // promoters
     case 'listProjects': requireAdmin_(req); return { projects: listProjects_() };
-    case 'createProject': requireAdmin_(req); return { project: createProject_(req.name, req.copyFrom) };
+    case 'createProject': requireAdmin_(req); return createProject_(req.name, req.copyFrom);
     case 'getProject': requireAdmin_(req); return { project: getProject_(req.id) };
     case 'savePromoter': requireAdmin_(req); return { project: savePromoter_(req.id, req.promoter || {}) };
     case 'saveLocation': requireAdmin_(req); return { project: saveLocation_(req.id, req.location || {}) };
@@ -2470,13 +2470,20 @@ function createProject_(name, copyFrom) {
     const catalogue = loadCatalogue_();
     const ss = SpreadsheetApp.create(projectSheetName_(nowStamp_().slice(0, 10), name));
     DriveApp.getFileById(ss.getId()).moveTo(folder);
-    buildProjectSheet_(ss, catalogue);
-    if (copyFrom) copyProjectSetup_(copyFrom, ss);
+    let skipped = [];
+    try {
+      buildProjectSheet_(ss, catalogue);
+      if (copyFrom) skipped = copyProjectSetup_(copyFrom, ss, catalogue);
+      SpreadsheetApp.flush(); // any refused write shows up here, before the project is listed
+    } catch (e) {
+      try { DriveApp.getFileById(ss.getId()).setTrashed(true); } catch (e2) { /* leave it */ }
+      throw e;
+    }
     const sh = projectsSheet_();
     const r = sh.getLastRow() + 1;
     sh.getRange(r, 1, 1, 5).setNumberFormat('@').setValues([[id, name, 'Open', ss.getUrl(), ss.getId()]]);
     sh.getRange(r, 6).setNumberFormat('yyyy-mm-dd hh:mm').setValue(new Date());
-    return getProject_(id);
+    return { project: getProject_(id), skipped: skipped };
   } finally {
     lock.releaseLock();
   }
@@ -3248,13 +3255,19 @@ function breakevenRows_(ev) {
 }
 
 /* new project from an earlier one: same games (Products) and stores (Locations, with logos). No promoters, no results. */
-function copyProjectSetup_(srcId, ss) {
+function copyProjectSetup_(srcId, ss, catalogue) {
   const src = SpreadsheetApp.openById(rowToProject_(findProjectRow_(srcId).values).sheetId);
+  // only games still in the SHN Catalogue: the Products dropdown refuses any other name
+  const inCat = {};
+  (catalogue || []).forEach(function (r) { inCat[String(r[0]).trim()] = 1; });
+  const skipped = [];
   const prods = src.getSheetByName('Products').getDataRange().getValues().slice(1)
-    .map(function (r) { return [String(r[0] || '').trim()]; }).filter(function (r) { return r[0]; });
+    .map(function (r) { return [String(r[0] || '').trim()]; })
+    .filter(function (r) { if (!r[0]) return false; if (!inCat[r[0]]) { skipped.push(r[0]); return false; } return true; });
   if (prods.length) ss.getSheetByName('Products').getRange(2, 1, prods.length, 1).setValues(prods);
   const locs = readLocations_(src).map(function (l) { return [l.id, l.store, l.branch, l.logo, l.notes]; });
   if (locs.length) ss.getSheetByName('Locations').getRange(2, 1, locs.length, 5).setValues(locs);
+  return skipped;
 }
 
 /* the stores of the promoter's last shift, for "Same as yesterday" on the clock-in page */

@@ -97,7 +97,11 @@
           st.projects.push(res.project);
           st.project = res.project;
           S.go('#/project/' + encodeURIComponent(res.project.id) + '/team');
-        }).catch(fail);
+          if (res.skipped && res.skipped.length) {
+            window.alert('Not copied (no longer in the SHN Catalogue, so they have no Ref code):\n\n• ' + res.skipped.join('\n• ') +
+              '\n\nIf they were renamed, pick the new names in the Products tab of the new project sheet.');
+          }
+        }).catch(function (e) { box.querySelector('[data-ok]').textContent = 'Create project'; fail(e); });
       });
     };
     document.getElementById('newProj').onclick = open;
