@@ -293,8 +293,36 @@
             '<td>' + (x.onShift ? '<span class="ds-st in">● In</span>' : '<span class="ds-st out">● Out</span>') + '</td>' +
             '<td class="num">' + S.num(x.activatedToday || 0) + '</td><td class="num">' + S.num(x.unitsToday || 0) + '</td></tr>';
         }).join('') + '</tbody><tfoot><tr><td>Total</td><td>' + ti + ' in</td><td class="num">' + S.num(ta) + '</td><td class="num">' + S.num(tu) + '</td></tr></tfoot></table></div>'
-        : '<div class="card empty"><p class="muted">No promoters yet.</p></div>');
-    document.getElementById('dsRefresh').onclick = function () { st.project = null; viewProject(p.id, 'day'); };
+        : '<div class="card empty"><p class="muted">No promoters yet.</p></div>') +
+      '<div id="dsMore"></div>';
+    document.getElementById('dsRefresh').onclick = function () { st.project = null; st.report = null; viewProject(p.id, 'day'); };
+    breakdowns(document.getElementById('dsMore'), p);
+  }
+
+  /* whole-project totals by store, game and day, under the day summary */
+  function breakdowns(el, p) {
+    if (!st.report || st.report.pid !== p.id) {
+      el.innerHTML = '<div class="loading"><div class="spinner"></div><div>Adding up the project…</div></div>';
+      S.api('projectReport', { id: p.id }).then(function (res) {
+        st.report = res.report; st.report.pid = p.id;
+        if (document.body.contains(el)) breakdowns(el, p);
+      }).catch(function (e) { el.innerHTML = '<p class="neg small">' + S.esc(e.message) + '</p>'; });
+      return;
+    }
+    var r = st.report;
+    var tbl = function (head, rows) {
+      return '<div class="card ds-card"><table class="ds ds-b"><thead><tr>' + head.map(function (h) { return '<th' + (h.charAt(0) === '#' ? ' class="num"' : '') + '>' + S.esc(h.replace(/^#/, '')) + '</th>'; }).join('') +
+        '</tr></thead><tbody>' + (rows.length ? rows.join('') : '<tr><td colspan="' + head.length + '" class="muted">Nothing yet.</td></tr>') + '</tbody></table></div>';
+    };
+    var n = function (v) { return '<td class="num">' + S.num(v) + '</td>'; };
+    var tbl4 = function (head, rows) { return tbl(head, rows).replace('ds ds-b', 'ds ds-b ds-b4'); };
+    el.innerHTML = '<p class="small muted" style="margin:18px 2px 0">Since the project started</p>' +
+      '<h2 class="section-title">By store</h2>' +
+      tbl(['Store', '#People activated', '#Games sold'], r.stores.map(function (x) { return '<tr><td>' + S.esc(x.store) + '</td>' + n(x.activated) + n(x.units) + '</tr>'; })) +
+      '<h2 class="section-title">By game</h2>' +
+      tbl(['Game', '#Games sold'], r.games.map(function (x) { return '<tr><td>' + S.esc(x.name) + '</td>' + n(x.units) + '</tr>'; })) +
+      '<h2 class="section-title">By day</h2>' +
+      tbl4(['Day', '#Promoters', '#People activated', '#Games sold'], r.days.map(function (x) { return '<tr><td>' + S.esc(fmtDate(x.date)) + '</td>' + n(x.promoters) + n(x.activated) + n(x.units) + '</tr>'; }));
   }
 
   /* payslip per promoter: a row per day, totals at the bottom; Shifts edited in the sheet show here */
@@ -319,9 +347,11 @@
         var ps = res.payslip;
         st.slipData = ps;
         body.innerHTML = '<div class="ps-top"><div class="small muted">' + S.esc(rateText(ps.promoter)) + '</div>' +
-          '<button class="btn btn-accent btn-sm" id="psPdf"' + (ps.rows.length ? '' : ' disabled') + '>PDF to share</button></div>' +
+          '<div class="head-actions"><button class="btn btn-ghost btn-sm" id="psPdf"' + (ps.rows.length ? '' : ' disabled') + '>PDF</button>' +
+          '<button class="btn btn-accent btn-sm" id="psShare"' + (ps.rows.length ? '' : ' disabled') + '>Share picture</button></div></div>' +
           '<div class="card table-wrap">' + slipTable(ps, false) + '</div>';
         body.querySelector('#psPdf').onclick = function () { slipPdf(ps); };
+        body.querySelector('#psShare').onclick = function () { slipShare(ps); };
       }).catch(function (e) { body.innerHTML = '<div class="card empty"><p class="neg">' + S.esc(e.message) + '</p></div>'; });
     };
     ['#psWho', '#psFrom', '#psTo'].forEach(function (q) { el.querySelector(q).onchange = load; });
@@ -348,11 +378,100 @@
       '<td class="num">' + m(ps.totals.total) + '</td></tr></tfoot></table>';
   }
 
+  function slipPeriod(ps) {
+    return ps.from || ps.to ? (ps.from ? fmtDate(ps.from) : 'Start') + ' – ' + (ps.to ? fmtDate(ps.to) : 'today')
+      : (ps.rows.length ? fmtDate(ps.rows[0].date) + ' – ' + fmtDate(ps.rows[ps.rows.length - 1].date) : '');
+  }
+
+  /* the payslip as a picture, shared to WhatsApp (or any app) from the phone's share menu */
+  function slipShare(ps) {
+    var btn = document.getElementById('psShare');
+    if (btn) btn.disabled = true;
+    drawSlip(ps).then(function (blob) {
+      var name = 'SHN LEB payslip - ' + ps.promoter.name + '.png';
+      var text = 'SHN LEB · ' + ps.project + '\nPayslip ' + ps.promoter.name + (slipPeriod(ps) ? ' · ' + slipPeriod(ps) : '') + '\nTotal pay: $' + ps.totals.total.toFixed(2);
+      var file = null;
+      try { file = new File([blob], name, { type: 'image/png' }); } catch (e) { file = null; }
+      if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+        return navigator.share({ files: [file], text: text }).catch(function (err) { if (err && err.name !== 'AbortError') showSlipImage(blob, name, text); });
+      }
+      showSlipImage(blob, name, text);
+    }).catch(function () { S.toast('Could not make the picture.', true); })
+      .then(function () { if (btn) btn.disabled = false; });
+  }
+
+  function showSlipImage(blob, name, text) {
+    var url = URL.createObjectURL(blob);
+    var wrap = document.createElement('div');
+    wrap.className = 'dialog-backdrop';
+    wrap.innerHTML = '<div class="card dialog ps-img-dlg"><h2>Payslip picture</h2><img class="summary-img" src="' + url + '" alt="Payslip">' +
+      '<p class="small muted">This device can\'t share pictures straight to WhatsApp: save the picture, then attach it in WhatsApp.</p>' +
+      '<div class="dialog-actions"><button class="btn btn-ghost" data-x>Close</button><a class="btn btn-ghost" href="https://wa.me/?text=' + encodeURIComponent(text) + '" target="_blank" rel="noopener">Open WhatsApp</a>' +
+      '<a class="btn btn-accent" href="' + url + '" download="' + S.esc(name) + '">Save picture</a></div></div>';
+    document.body.appendChild(wrap);
+    var close = function () { wrap.remove(); URL.revokeObjectURL(url); };
+    wrap.querySelector('[data-x]').onclick = close;
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) close(); });
+  }
+
+  var slipLogo = null;
+  function drawSlip(ps) {
+    var logoP = slipLogo ? Promise.resolve(slipLogo) : new Promise(function (res) {
+      var im = new Image(); im.onload = function () { slipLogo = im; res(im); }; im.onerror = function () { res(null); }; im.src = 'assets/logo-white.png';
+    });
+    return logoP.then(function (logo) {
+      var W = 1240, pad = 50, rowH = 58;
+      var F = '-apple-system, Segoe UI, Roboto, Arial, sans-serif';
+      var cols = [['Day', 190, 'l'], ['In', 100, 'l'], ['Out', 140, 'l'], ['Hours', 110, 'r'], ['Day cost', 150, 'r'], ['Games', 120, 'r'], ['Commission', 170, 'r'], ['Total', 160, 'r']];
+      var H = 330 + (ps.rows.length + 2) * rowH + 130;
+      var c = document.createElement('canvas'); c.width = W; c.height = H;
+      var x = c.getContext('2d');
+      x.fillStyle = '#f7f2ec'; x.fillRect(0, 0, W, H);
+      x.fillStyle = '#231F20'; x.fillRect(0, 0, W, 190);
+      if (logo) { var lh = 64; x.drawImage(logo, pad, 34, logo.width * lh / logo.height, lh); }
+      x.fillStyle = '#EB5C24'; x.fillRect(0, 186, W, 8);
+      x.fillStyle = '#fff'; x.font = '700 42px ' + F; x.fillText(ps.promoter.name, pad, 158);
+      x.textAlign = 'right'; x.fillStyle = '#c9c3bd'; x.font = '26px ' + F;
+      x.fillText('Payslip · ' + ps.project, W - pad, 66); x.fillText(slipPeriod(ps), W - pad, 104); x.textAlign = 'left';
+      x.fillStyle = '#7a736d'; x.font = '24px ' + F; x.fillText('Pay: ' + rateText(ps.promoter), pad, 244);
+      var y = 280;
+      var money2 = function (v) { return '$' + Number(v).toFixed(2); };
+      var drawRow = function (vals, opts) {
+        var cx = pad;
+        if (opts.bg) { x.fillStyle = opts.bg; x.fillRect(pad - 12, y, W - 2 * pad + 24, rowH); }
+        cols.forEach(function (col, i) {
+          x.fillStyle = opts.colors && opts.colors[i] || opts.color || '#231F20';
+          x.font = (opts.bold || (opts.boldLast && i === cols.length - 1) ? '700 ' : '') + (opts.size || 26) + 'px ' + F;
+          x.textAlign = col[2] === 'r' ? 'right' : 'left';
+          x.fillText(String(vals[i]), col[2] === 'r' ? cx + col[1] - 12 : cx, y + rowH / 2 + 9);
+          cx += col[1];
+        });
+        x.textAlign = 'left';
+        y += rowH;
+        x.fillStyle = '#e3ddd5'; x.fillRect(pad - 12, y - 1, W - 2 * pad + 24, 1);
+      };
+      drawRow(cols.map(function (cc) { return cc[0]; }), { bg: '#ece5db', color: '#5e5852', size: 22, bold: true });
+      ps.rows.forEach(function (d, i) {
+        drawRow([fmtDate(d.date), d.timeIn || '–', d.timeOut || (d.open ? 'not out' : '–'), d.hours.toFixed(2), money2(d.hourCost), d.units, money2(d.commission), money2(d.total)],
+          { bg: i % 2 ? '#fbf8f4' : '#fff', boldLast: true, colors: { 2: d.timeOut ? null : '#b42318' } });
+      });
+      x.fillStyle = '#231F20'; x.fillRect(pad - 12, y, W - 2 * pad + 24, 3);
+      var t = ps.totals;
+      drawRow(['Total · ' + t.days + (t.days === 1 ? ' day' : ' days'), '', '', t.hours.toFixed(2), money2(t.hourCost), t.units, money2(t.commission), money2(t.total)],
+        { bg: '#fff', bold: true, colors: { 7: '#EB5C24' } });
+      y += 50;
+      x.fillStyle = '#231F20'; x.font = '30px ' + F; x.fillText('Total pay', pad, y);
+      x.fillStyle = '#EB5C24'; x.font = '700 44px ' + F; x.fillText(money2(t.total), pad + 150, y + 2);
+      x.fillStyle = '#9a938d'; x.font = '20px ' + F; x.textAlign = 'right';
+      x.fillText('SHN LEB Promoters · ' + new Date().toLocaleDateString('en-GB'), W - pad, y); x.textAlign = 'left';
+      return new Promise(function (res, rej) { c.toBlob(function (b) { b ? res(b) : rej(new Error('no picture')); }, 'image/png'); });
+    });
+  }
+
   function slipPdf(ps) {
     var w = window.open('', '_blank');
     if (!w) { S.toast('Allow pop-ups for this site to make the PDF.', true); return; }
-    var period = ps.from || ps.to ? (ps.from ? fmtDate(ps.from) : 'Start') + ' – ' + (ps.to ? fmtDate(ps.to) : 'today')
-      : (ps.rows.length ? fmtDate(ps.rows[0].date) + ' – ' + fmtDate(ps.rows[ps.rows.length - 1].date) : '');
+    var period = slipPeriod(ps);
     var logo = base() + 'assets/logo-dark.png';
     var html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + S.esc('Payslip - ' + ps.promoter.name + ' - ' + ps.project) + '</title><style>' +
       'body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#231F20;margin:28px;font-size:12px}h1{font-size:22px;margin:4px 0}' +

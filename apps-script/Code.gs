@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.14.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -143,6 +143,10 @@ function setup() {
     props.setProperty('MASTER_ID', master.getId());
   }
   ensureMasterTabs_(master);
+  protectMaster_(master);
+  listProjects_().forEach(function (p) {
+    try { protectProject_(SpreadsheetApp.openById(p.sheetId)); } catch (e) { Logger.log('Could not protect project ' + p.name + ': ' + e); }
+  });
 
   if (!props.getProperty('TOKEN_SECRET')) {
     props.setProperty('TOKEN_SECRET', Utilities.getUuid() + Utilities.getUuid());
@@ -2482,9 +2486,7 @@ function buildProjectSheet_(ss, catalogue) {
   loc.setColumnWidth(2, 220); loc.setColumnWidth(3, 220);
   loc.getRange(1, 1).setNote('Leave Location ID empty: the app fills it the first time it reads the store.');
   ss.getSheetByName('Results').hideColumns(11);
-  ['Results', 'Shifts', 'Store Time'].forEach(function (t) {
-    ss.getSheetByName(t).getRange('A1:Z1').protect().setWarningOnly(true).setDescription('Written by the app');
-  });
+  protectProject_(ss);
   ss.setActiveSheet(pr);
 }
 
@@ -2953,5 +2955,51 @@ function payslip_(id, promoterId, from, to) {
     from: from, to: to, rows: rows,
     totals: { days: rows.length, hours: sum('hours'), hourCost: sum('hourCost'), units: sum('units'), commission: sum('commission'), total: sum('total') }
   };
+}
+
+/* ------------------------------------------------------------------ protected ranges
+   Warning-only: anyone editing these cells first gets "You are trying to edit a protected cell" and must confirm.
+   The app (which runs as the sheet owner) is never blocked. Re-running setup refreshes them. */
+const PROTECT_TAG = 'SHN LEB · ';
+
+function protectWarn_(range, why) {
+  range.protect().setDescription(PROTECT_TAG + why).setWarningOnly(true);
+}
+
+function clearAppProtections_(ss) {
+  ss.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) {
+    if (String(p.getDescription()).indexOf(PROTECT_TAG) === 0) p.remove();
+  });
+}
+
+function protectMaster_(ss) {
+  clearAppProtections_(ss);
+  ['Events', 'Projects'].forEach(function (t) {
+    const sh = ss.getSheetByName(t);
+    protectWarn_(sh.getRange(1, 1, MAX_ROWS + 1, MASTER_TABS[t].length), 'Written by the portal: change events and projects from the portal');
+  });
+  const set = ss.getSheetByName('Settings');
+  protectWarn_(set.getRange(1, 1, 1, 3), 'Column headers used by the app');
+  protectWarn_(set.getRange(2, 1, MAX_ROWS, 1), 'Setting names used by the app: change only the Value column');
+}
+
+function protectProject_(ss) {
+  clearAppProtections_(ss);
+  // also drop the header-only protections of v1.12
+  ss.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) { if (p.getDescription() === 'Written by the app') p.remove(); });
+  PROJECT_TABS.forEach(function (t) {
+    const sh = ss.getSheetByName(t[0]);
+    if (sh) protectWarn_(sh.getRange(1, 1, 1, t[1].length), 'Column headers used by the app');
+  });
+  const tab = function (n) { return ss.getSheetByName(n); };
+  protectWarn_(tab('Promoters').getRange(2, 1, MAX_ROWS, 1), 'Promoter ID: made by the app, it is in the promoter\'s link');
+  protectWarn_(tab('Promoters').getRange(2, 3, MAX_ROWS, 1), 'Code: change it from the portal (New code)');
+  protectWarn_(tab('Locations').getRange(2, 1, MAX_ROWS, 1), 'Location ID: made by the app');
+  protectWarn_(tab('Products').getRange(2, 2, MAX_ROWS, 3), 'Filled automatically from the product name');
+  protectWarn_(tab('Results').getRange(2, 1, MAX_ROWS, 11), 'Written by the promoters\' phones');
+  protectWarn_(tab('Shifts').getRange(2, 1, MAX_ROWS, 1), 'Shift ID: made by the app (leave empty on rows you add)');
+  protectWarn_(tab('Shifts').getRange(2, 7, MAX_ROWS, 1), 'Hours: worked out from Clock In and Clock Out');
+  protectWarn_(tab('Store Time').getRange(2, 1, MAX_ROWS, 7), 'Written by the app at clock out');
+  protectWarn_(tab('Catalogue').getRange(1, 1, MAX_ROWS + 1, 5), 'Copy of the SHN Catalogue used by the Products dropdown');
 }
 

@@ -830,3 +830,9 @@ body.promo-mode .app { max-width: 900px; }
 .ps-tbl tfoot td { font-weight: 800; border-top: 2px solid var(--ink); background: #fafbfd; }
 .ps-tbl tfoot td:last-child { color: var(--accent); font-size: 16px; }
 @media (max-width: 560px) { .ps-filters { grid-template-columns: 1fr 1fr; } .ps-filters .field:first-child { grid-column: 1 / -1; } }
+.ds-b th:nth-child(n) { width: auto; }
+.ds-b th:first-child { width: 46%; }
+.ps-img-dlg { max-width: 640px; }
+.ps-img-dlg .summary-img { width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+.ds th.num { font-size: 11.5px; font-weight: 700; text-align: right; }
+.ds-b4 th:first-child { width: 31%; }
