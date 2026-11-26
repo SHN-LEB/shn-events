@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  var APP_VERSION = '1.14.0';
+  var APP_VERSION = '1.16.0';
   var API_URL = (window.SHN_CONFIG && window.SHN_CONFIG.API_URL) || '';
   var TOKEN_KEY = 'shn-events-admin';
   var DRAFT_TABS = [
@@ -17,6 +17,7 @@
     { id: 'pos', label: 'POS' },
     { id: 'cash', label: 'Cash' },
     { id: 'shifts', label: 'Shifts & pay' },
+    { id: 'payslips', label: 'Payslips' },
     { id: 'days', label: 'Days' },
     { id: 'customers', label: 'Customers' },
     { id: 'expenses', label: 'Expenses' },
@@ -140,8 +141,16 @@
 
   function setTopbar() {
     topbarRight.innerHTML = getToken()
-      ? '<button class="link-btn" id="signOut">Sign out</button>'
+      ? '<button class="topbar-refresh" id="topRefresh" aria-label="Refresh" title="Read the Google Sheets again">↻</button><button class="link-btn" id="signOut">Sign out</button>'
       : '';
+    var rf = document.getElementById('topRefresh');
+    if (rf) rf.onclick = function () {
+      rf.classList.add('spin');
+      state.events = null; state.event = null; state.report = null; state.inv = null; state.pnl = null;
+      if (window.SHN_PROMO) window.SHN_PROMO.reset();
+      render();
+      setTimeout(function () { rf.classList.remove('spin'); }, 900);
+    };
     var b = document.getElementById('signOut');
     if (b) b.onclick = function () { setToken(null); state.events = null; if (window.SHN_PROMO) window.SHN_PROMO.reset(); go('#/login'); };
   }
@@ -435,7 +444,7 @@
     else if (tab === 'settings') { body.innerHTML = settingsHtml(ev); wireSettings(ev); }
     else if (tab === 'inventory') viewInventory(body, ev);
     else if (tab === 'pos') window.SHN_POS.mount(body, { eventId: ev.id, token: getToken(), admin: true });
-    else if (tab === 'cash' || tab === 'shifts' || tab === 'days' || tab === 'customers') viewReport(body, ev, tab);
+    else if (tab === 'cash' || tab === 'shifts' || tab === 'payslips' || tab === 'days' || tab === 'customers') viewReport(body, ev, tab);
     else if (tab === 'expenses' || tab === 'dashboard' || tab === 'pnl') viewPnl(body, ev, tab);
     else if (tab === 'learnings') viewLearnings(body, ev);
   }
@@ -994,6 +1003,36 @@
     return out;
   }
 
+  /* readable copy of the simulation for the Break-even tab of the event's Google Sheet: [label, at break-even, at target] */
+  function beSummary(b, ev) {
+    var c = beCalc(b, ev);
+    var m = function (v) { return v == null || isNaN(v) ? '–' : '$' + Math.round(v).toLocaleString('en-US'); };
+    var n1 = function (v) { return v == null || isNaN(v) ? '–' : String(Math.round(v * 10) / 10); };
+    var tLabel = c.targetPct == null ? 'At target profit (not set)' : 'At ' + (Math.round(c.targetPct * 10) / 10) + '% profit';
+    var both = function (label, f) { return [label, c.be ? f(c.be) : '–', c.t ? f(c.t) : '–']; };
+    var rows = [['#Results', 'At break-even', tLabel],
+      ['Games per day', c.bePerDay == null ? '–' : String(Math.ceil(c.bePerDay)), c.tPerDay == null ? '–' : String(Math.ceil(c.tPerDay))],
+      both('Games, whole event', function (r) { return String(Math.ceil(r.units)); }),
+      both('Sales', function (r) { return m(r.sales); }),
+      both('COGS', function (r) { return m(r.cogs); }),
+      both('Staff (hours + commissions)', function (r) { return m(r.staff); }),
+      both('Rent', function (r) { return m(r.rent); }),
+      both('Other expenses', function (r) { return m(r.other); }),
+      both('Total expenses', function (r) { return m(r.total); }),
+      both('Profit', function (r) { return m(r.profit); }),
+      [], ['#Inputs', 'Value'],
+      ['Days open', String(c.days) + (c.fromInfo ? ' (from Info)' : '')], ['Opening hours, whole event', n1(c.hours) + ' h'],
+      ['Extra staff hours per day', n1(Number(b.extraHours) || 0) + ' h'], ['Staff on the stand', String(Number(b.staffCount) || 0)],
+      ['Staff rate per hour', '$' + (Number(b.staffRate) || 0)], ['Staff hours cost (before commissions)', m(c.staffCost)],
+      ['Average game price', '$' + (Number(b.avgPrice) || 0)], ['COGS', (Number(b.cogsPct) || 0) + '% of price'],
+      ['Commission threshold', '$' + (Number(b.threshold) || 0)], ['Games at or over the threshold', (Number(b.overPct) || 0) + '%'],
+      ['Commission under / at or over', '$' + (Number(b.commUnder) || 0) + ' / $' + (Number(b.commOver) || 0) + ' per game'],
+      ['Fixed rent, whole event', m(Number(b.rentFixed) || 0)], ['Rent as % of sales', (Number(b.rentPct) || 0) + '%']];
+    (b.others || []).forEach(function (o) { if (o.label || Number(o.amount)) rows.push(['Other: ' + (o.label || 'expense'), m(Number(o.amount) || 0)]); });
+    rows.push(['Other expenses as % of sales', (Number(b.otherPct) || 0) + '%']);
+    return rows;
+  }
+
   function viewBreakeven(body, ev) {
     var b = Object.assign(beDefaults(ev), ev.breakeven || {});
     b.others = (b.others || []).map(function (o) { return { label: o.label || '', amount: o.amount }; });
@@ -1036,6 +1075,7 @@
 
     var saver = autosaver(document.getElementById('beState'), function () {
       var save = Object.assign({}, b, { others: b.others.filter(function (o) { return o.label || Number(o.amount); }), savedAt: new Date().toISOString() });
+      try { save.summary = beSummary(save, ev); } catch (e) { delete save.summary; }
       ev.breakeven = JSON.parse(JSON.stringify(save));
       return api('saveBreakeven', { id: ev.id, breakeven: save });
     });
@@ -1260,6 +1300,51 @@
     });
   }
 
+  /* ---------------- payslips: one staff member, a row per day, totals; shared as a picture or PDF */
+  function viewEventSlips(body, ev, r) {
+    var SL = window.SHN_PROMO.slip;
+    var staff = ev.staff || [];
+    var names = {};
+    staff.forEach(function (p) { if (p.name) names[p.name] = 1; });
+    r.pay.forEach(function (d) { names[d.name] = 1; });
+    var list = Object.keys(names).sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
+    if (!list.length) { body.innerHTML = '<div class="card empty"><p class="muted">No staff yet. Add them in Settings.</p></div>'; return; }
+    var sel = state.evSlip && state.evSlip.id === ev.id ? state.evSlip : { id: ev.id, name: list[0], from: '', to: '' };
+    if (list.indexOf(sel.name) < 0) sel.name = list[0];
+    state.evSlip = sel;
+    body.innerHTML = '<div class="card ps-filters"><div class="field"><label for="psWho">Staff</label><select class="input" id="psWho">' +
+      list.map(function (n) { return '<option' + (n === sel.name ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') + '</select></div>' +
+      '<div class="field"><label for="psFrom">From</label><input class="input" type="date" id="psFrom" value="' + esc(sel.from) + '"></div>' +
+      '<div class="field"><label for="psTo">To</label><input class="input" type="date" id="psTo" value="' + esc(sel.to) + '"></div></div>' +
+      '<div id="psBody"></div>' +
+      '<p class="small muted" style="margin-top:12px">Pay = hours × hourly rate + commission (per item, on the price actually paid; returns are taken off). To fix a forgotten clock-in or clock-out, change the time in the Shifts tab of the event\'s Google Sheet, then press ↻ at the top.</p>';
+    function draw() {
+      sel.name = body.querySelector('#psWho').value; sel.from = body.querySelector('#psFrom').value; sel.to = body.querySelector('#psTo').value;
+      var p = staff.filter(function (x) { return x.name === sel.name; })[0] || {};
+      var rows = r.pay.filter(function (d) { return d.name === sel.name && (!sel.from || d.date >= sel.from) && (!sel.to || d.date <= sel.to); })
+        .sort(function (a, b) { return a.date < b.date ? -1 : 1; }).map(function (d) {
+          var ins = d.shifts.map(function (x) { return x.in; }).filter(Boolean).sort();
+          var outs = d.shifts.map(function (x) { return x.out; }).filter(Boolean).sort();
+          return { date: d.date, timeIn: ins[0] || '', timeOut: d.open ? '' : (outs[outs.length - 1] || ''), open: d.open, hours: d.hours, hourCost: d.hoursCost,
+            units: d.units, commission: d.commission, total: d.pay };
+        });
+      var sum = function (k) { return Math.round(rows.reduce(function (a, x) { return a + (Number(x[k]) || 0); }, 0) * 100) / 100; };
+      var ps = { project: ev.name, footer: 'SHN LEB Events', from: sel.from, to: sel.to, rows: rows,
+        promoter: { name: sel.name, hourlyRate: p.hourlyRate || 0, commissionUnder: p.commissionUnder || 0, commissionOver: p.commissionOver || 0,
+          threshold: ev.settings && ev.settings.commissionThreshold != null ? Number(ev.settings.commissionThreshold) : null },
+        totals: { days: rows.length, hours: sum('hours'), hourCost: sum('hourCost'), units: sum('units'), commission: sum('commission'), total: sum('total') } };
+      var el = body.querySelector('#psBody');
+      el.innerHTML = '<div class="ps-top"><div class="small muted">' + esc(SL.rateText(ps.promoter)) + '</div>' +
+        '<div class="head-actions"><button class="btn btn-ghost btn-sm" id="psPdf"' + (rows.length ? '' : ' disabled') + '>PDF</button>' +
+        '<button class="btn btn-accent btn-sm" id="psShare"' + (rows.length ? '' : ' disabled') + '>Share picture</button></div></div>' +
+        '<div class="card table-wrap">' + SL.table(ps, false) + '</div>';
+      el.querySelector('#psPdf').onclick = function () { SL.pdf(ps); };
+      el.querySelector('#psShare').onclick = function () { SL.share(ps); };
+    }
+    ['#psWho', '#psFrom', '#psTo'].forEach(function (q) { body.querySelector(q).onchange = draw; });
+    draw();
+  }
+
   /* ---------------- management reports: cash, shifts & pay, days */
   function viewReport(body, ev, tab) {
     if (!state.report || state.report.id !== ev.id) {
@@ -1274,6 +1359,7 @@
       return;
     }
     var r = state.report.data;
+    if (tab === 'payslips') return viewEventSlips(body, ev, r);
     var refresh = '<div class="toolbar"><span></span><button class="btn btn-ghost" id="repRefresh">Refresh</button></div>';
     var lbpTxt = function (n) { return num(Math.round(n)) + ' LBP'; };
     var sgn = function (n, f) { n = Number(n) || 0; return n === 0 ? '<span class="good-t">0</span>' : '<span class="neg">' + (n > 0 ? '+' : '−') + f(Math.abs(n)) + '</span>'; };
@@ -1611,7 +1697,7 @@
   /* ---------------- router */
   var qs = new URLSearchParams(location.search);
   var staffEvent = qs.get('e');
-  var promoLink = qs.get('p') && qs.get('u') ? { p: qs.get('p'), u: qs.get('u') } : null;
+  var promoLink = qs.get('p') ? { p: qs.get('p'), u: qs.get('u') || '' } : null;
 
   var lastHash = location.hash;
   var skipGuard = false;

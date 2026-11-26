@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -146,12 +146,13 @@ function setup() {
   ensureMasterTabs_(master);
   protectMaster_(master);
   listProjects_().forEach(function (p) {
-    try { protectProject_(SpreadsheetApp.openById(p.sheetId)); } catch (e) { Logger.log('Could not protect project ' + p.name + ': ' + e); }
+    try { const pss = SpreadsheetApp.openById(p.sheetId); readPromoters_(pss); protectProject_(pss); } catch (e) { Logger.log('Could not protect project ' + p.name + ': ' + e); }
   });
-  // lock the protected ranges of every event sheet already made
+  // lock the protected ranges of every event sheet already made, and add its Info and Break-even tabs
   listEvents_().forEach(function (ev) {
     if (!ev.sheetId) return;
     try { relockSheet_(SpreadsheetApp.openById(ev.sheetId)); } catch (e) { Logger.log('Could not lock event ' + ev.name + ': ' + e); }
+    try { writeEventDocs_(ev); } catch (e) { Logger.log('Could not write Info/Break-even for ' + ev.name + ': ' + e); }
   });
 
   if (!props.getProperty('TOKEN_SECRET')) {
@@ -271,6 +272,7 @@ function route_(req) {
     case 'getProject': requireAdmin_(req); return { project: getProject_(req.id) };
     case 'savePromoter': requireAdmin_(req); return { project: savePromoter_(req.id, req.promoter || {}) };
     case 'saveLocation': requireAdmin_(req); return { project: saveLocation_(req.id, req.location || {}) };
+    case 'uploadLogo': requireAdmin_(req); return { project: uploadLogo_(req.id, req.locationId, req.image) };
     case 'setProjectStatus': requireAdmin_(req); return { project: setProjectStatus_(req.id, req.status) };
     case 'projectReport': requireAdmin_(req); return { report: projectReport_(req.id) };
     case 'payslip': requireAdmin_(req); return { payslip: payslip_(req.id, req.promoterId, req.from, req.to) };
@@ -478,6 +480,7 @@ function saveInfo_(id, data) {
     setEventSettings_(SpreadsheetApp.openById(ev.sheetId), {
       'Event Name': f.name, 'Type': f.type, 'Venue': f.venue, 'Start Date': f.startDate, 'End Date': f.endDate, 'Opening Hours': info.openingHours || ''
     });
+    try { writeEventDocs_(rowToEvent_(findEventRow_(id).values), 'info'); } catch (e) { logError_(e, { where: 'event Info tab' }); }
   }
   return getEvent_(id);
 }
@@ -527,6 +530,10 @@ function saveBreakeven_(id, be) {
   const text = JSON.stringify(be || {});
   if (text.length > 20000) throw userError_('The break-even simulation is too long to save.', 'invalid');
   found.sheet.getRange(found.row, 12).setNumberFormat('@').setValue(text);
+  const ev = rowToEvent_(findEventRow_(id).values);
+  if (!isDraft_(ev) && ev.sheetId) {
+    try { writeEventDocs_(ev, 'breakeven'); } catch (e) { logError_(e, { where: 'event Break-even tab' }); }
+  }
   return getEvent_(id);
 }
 
@@ -585,6 +592,8 @@ function launchEvent_(id) {
       try { copyFromEvent_(ev.copyFrom, ss); } catch (e) { console.error(e); }
     }
     found.sheet.getRange(found.row, 7, 1, 3).setValues([['Open', ss.getUrl(), ss.getId()]]);
+    ev.sheetId = ss.getId();
+    try { writeEventDocs_(ev); } catch (e) { console.error(e); }
     return getEvent_(id);
   } finally {
     lock.releaseLock();
@@ -2025,8 +2034,15 @@ function eventReport_(id) {
   shiftRows.forEach(function (r, i) {
     const k = dateStr_(r[0]) + '|' + String(r[1]).trim();
     const d = days[k] = days[k] || { date: dateStr_(r[0]), name: String(r[1]).trim(), shifts: [], hours: 0, notes: [], open: false };
-    const hours = Number(r[4]) || 0;
-    d.shifts.push({ in: String(r[2]).slice(11), out: String(r[3]).slice(11), hours: hours, row: i + 2 });
+    // times may have been fixed by hand in the sheet: work the hours out again from them
+    const cin = shiftStamp_(r[2], d.date), cout = shiftStamp_(r[3], d.date);
+    let hours = Number(r[4]) || 0;
+    if (cin && cout) {
+      let ms = parseStamp_(cout) - parseStamp_(cin);
+      if (ms < 0 && cout.slice(0, 10) === cin.slice(0, 10)) ms += 86400000;
+      hours = Math.max(0, Math.round(ms / 36000) / 100);
+    }
+    d.shifts.push({ in: cin ? cin.slice(11) : String(r[2]).slice(11), out: cout ? cout.slice(11) : String(r[3]).slice(11), hours: hours, row: i + 2 });
     d.hours = round2_(d.hours + hours);
     if (String(r[5]).trim()) d.notes.push(String(r[5]));
     if (String(r[2]).trim() && !String(r[3]).trim()) d.open = true;
@@ -2399,7 +2415,7 @@ function dateStr_(v) {
    and people activated. No cash, no stock: the store's cashier takes the payment. */
 
 const PROJECT_TABS = [
-  ['Promoters', ['Promoter ID', 'Name', 'Code', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/unit)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/unit)', 'Active (Y/N)']],
+  ['Promoters', ['Promoter ID', 'Code', 'Name', 'Hourly Rate (USD)', 'Commission Under Threshold (USD/unit)', 'Threshold (USD)', 'Commission At/Over Threshold (USD/unit)', 'Active (Y/N)']],
   ['Locations', ['Location ID', 'Store', 'Location / Branch', 'Logo URL', 'Notes']],
   ['Products', ['Product', 'Ref Code (auto)', 'Price (USD, auto)', 'Category (auto)']],
   ['Results', ['Date', 'Promoter ID', 'Promoter', 'Location ID', 'Store', 'Ref Code', 'Product', 'Units', 'Price (USD)', 'Updated At', 'Key']],
@@ -2485,12 +2501,11 @@ function buildProjectSheet_(ss, catalogue) {
   prod.setColumnWidth(1, 320);
   const pr = ss.getSheetByName('Promoters');
   pr.getRange(2, 8, MAX_ROWS, 1).setDataValidation(list(['Y', 'N']));
-  pr.getRange(2, 3, MAX_ROWS, 1).setNumberFormat('@');
-  pr.setColumnWidth(2, 200);
-  pr.getRange(1, 1, 1, 3).setNote('Promoter ID and Code are made by the portal. Add promoters from the portal (Promoters → project → + Add promoter).');
+  pr.getRange(2, 2, MAX_ROWS, 1).setNumberFormat('@');
+  pr.setColumnWidth(3, 200);
   const loc = ss.getSheetByName('Locations');
   loc.setColumnWidth(2, 220); loc.setColumnWidth(3, 220);
-  loc.getRange(1, 1).setNote('Leave Location ID empty: the app fills it the first time it reads the store.');
+  colourProject_(ss);
   ss.getSheetByName('Results').hideColumns(11);
   protectProject_(ss);
   ss.setActiveSheet(pr);
@@ -2505,17 +2520,21 @@ function openProject_(id, forWrite) {
 /* promoters list; rows typed in the sheet without an ID or code get one */
 function readPromoters_(ss) {
   const sh = ss.getSheetByName('Promoters');
-  const values = sh.getDataRange().getValues();
+  let values = sh.getDataRange().getValues();
+  if (String(values[0][1]).trim() === 'Name' && String(values[0][2]).trim() === 'Code') { // v1.12-v1.15 layout: Name before Code
+    migratePromoterCols_(ss);
+    values = sh.getDataRange().getValues();
+  }
   const ids = {}, codes = {};
-  values.slice(1).forEach(function (r) { if (String(r[0]).trim()) ids[String(r[0]).trim()] = 1; if (String(r[2]).trim()) codes[String(r[2]).trim()] = 1; });
+  values.slice(1).forEach(function (r) { if (String(r[0]).trim()) ids[String(r[0]).trim()] = 1; if (String(r[1]).trim()) codes[String(r[1]).trim()] = 1; });
   const out = [];
   for (let i = 1; i < values.length; i++) {
     const r = values[i];
-    const name = String(r[1] || '').trim();
+    const name = String(r[2] || '').trim();
     if (!name) continue;
-    let id = String(r[0] || '').trim(), code = String(r[2] || '').trim();
+    let id = String(r[0] || '').trim(), code = String(r[1] || '').trim();
     if (!id) { let n = Object.keys(ids).length + 1; do { id = 'P' + ('00' + n++).slice(-3); } while (ids[id]); ids[id] = 1; sh.getRange(i + 1, 1).setValue(id); }
-    if (!code) { code = newCode_(codes); codes[code] = 1; sh.getRange(i + 1, 3).setNumberFormat('@').setValue(code); }
+    if (!code) { code = newCode_(codes); codes[code] = 1; sh.getRange(i + 1, 2).setNumberFormat('@').setValue(code); }
     const th = r[5] === '' || r[5] == null ? null : parseMoney_(r[5]);
     out.push({ id: id, name: name, code: code, hourlyRate: parseMoney_(r[3]), commissionUnder: parseMoney_(r[4]), threshold: th,
       commissionOver: parseMoney_(r[6]), active: String(r[7] || 'Y').trim().toUpperCase() !== 'N', row: i + 1 });
@@ -2644,15 +2663,15 @@ function savePromoter_(id, p) {
     let n = list.length + 1, pid;
     do { pid = 'P' + ('00' + n++).slice(-3); } while (ids[pid]);
     let r = 2;
-    const col = sh.getRange(1, 2, Math.max(1, sh.getLastRow()), 1).getValues();
+    const col = sh.getRange(1, 3, Math.max(1, sh.getLastRow()), 1).getValues();
     for (let i = col.length - 1; i >= 0; i--) if (String(col[i][0]).trim()) { r = i + 2; break; }
-    sh.getRange(r, 3).setNumberFormat('@');
-    sh.getRange(r, 1, 1, 8).setValues([[pid, name, newCode_(codes), num(p.hourlyRate), num(p.commissionUnder), num(p.threshold), num(p.commissionOver), 'Y']]);
+    sh.getRange(r, 2).setNumberFormat('@');
+    sh.getRange(r, 1, 1, 8).setValues([[pid, newCode_(codes), name, num(p.hourlyRate), num(p.commissionUnder), num(p.threshold), num(p.commissionOver), 'Y']]);
     return getProject_(id);
   }
   const cur = list.filter(function (x) { return x.id === String(p.id); })[0];
   if (!cur) throw userError_('Promoter not found.', 'not_found');
-  if (p.name != null && String(p.name).trim()) sh.getRange(cur.row, 2).setValue(String(p.name).trim().slice(0, 80));
+  if (p.name != null && String(p.name).trim()) sh.getRange(cur.row, 3).setValue(String(p.name).trim().slice(0, 80));
   ['hourlyRate', 'commissionUnder', 'threshold', 'commissionOver'].forEach(function (k, i) {
     if (p[k] !== undefined) sh.getRange(cur.row, 4 + i).setValue(num(p[k]));
   });
@@ -2660,7 +2679,7 @@ function savePromoter_(id, p) {
   if (p.newCode) {
     const codes = {};
     list.forEach(function (x) { codes[x.code] = 1; });
-    sh.getRange(cur.row, 3).setNumberFormat('@').setValue(newCode_(codes));
+    sh.getRange(cur.row, 2).setNumberFormat('@').setValue(newCode_(codes));
   }
   return getProject_(id);
 }
@@ -2707,6 +2726,7 @@ function setProjectStatus_(id, status) {
 function promoterPublic_(projectId, promoterId) {
   const o = openProject_(projectId, false);
   if (o.project.status === 'Closed') throw userError_('This project is closed.', 'closed');
+  if (!promoterId) return { project: o.project.name, name: '' };
   const p = readPromoters_(o.ss).filter(function (x) { return x.id === String(promoterId); })[0];
   if (!p || !p.active) throw userError_('This link is not active. Ask your manager.', 'not_found');
   return { project: o.project.name, name: p.name };
@@ -2715,20 +2735,30 @@ function promoterPublic_(projectId, promoterId) {
 function promoterLogin_(req) {
   const o = openProject_(req.projectId, true);
   const pid = String(req.promoterId || '');
+  const code = String(req.code || '').trim();
   const cache = CacheService.getScriptCache();
-  const key = 'pcodefail_' + o.project.id + '_' + pid;
+  // one shared link per project: after 5 wrong codes in a row the link rests for 5 minutes
+  const key = 'pcodefail_' + o.project.id;
   const fails = Number(cache.get(key) || 0);
-  if (fails >= 10) throw userError_('Too many wrong codes. Wait 10 minutes and try again.', 'locked');
-  const p = readPromoters_(o.ss).filter(function (x) { return x.id === pid; })[0];
-  if (!p || !p.active) throw userError_('This link is not active. Ask your manager.', 'not_found');
-  if (String(req.code || '').trim() !== p.code) {
-    cache.put(key, String(fails + 1), 600);
-    Utilities.sleep(600);
-    throw userError_('Wrong code.', 'bad_pin');
+  if (fails >= 5) throw userError_('Too many wrong codes. Wait 5 minutes and try again.', 'locked');
+  const list = readPromoters_(o.ss);
+  let p;
+  if (pid) { // older personal links (?p=&u=)
+    p = list.filter(function (x) { return x.id === pid; })[0];
+    if (!p || !p.active) throw userError_('This link is not active. Ask your manager.', 'not_found');
+    if (code !== p.code) p = null;
+  } else {
+    p = list.filter(function (x) { return x.active && x.code === code; })[0];
   }
+  if (!p) {
+    cache.put(key, String(fails + 1), 300);
+    Utilities.sleep(600);
+    throw userError_(fails + 1 >= 5 ? 'Too many wrong codes. Wait 5 minutes and try again.' : 'Wrong code.', fails + 1 >= 5 ? 'locked' : 'bad_pin');
+  }
+  cache.remove(key);
   const exp = Date.now() + PROMO_TOKEN_DAYS * 86400000;
   // the token carries the code: changing the code in the portal signs the promoter out
-  return { token: signToken_('promo:' + o.project.id + ':' + pid + ':' + sha256Hex_(p.code).slice(0, 8), exp), expires: exp, name: p.name, project: o.project.name };
+  return { token: signToken_('promo:' + o.project.id + ':' + p.id + ':' + sha256Hex_(p.code).slice(0, 8), exp), expires: exp, name: p.name, promoterId: p.id, project: o.project.name };
 }
 
 /* returns the promoter (checked against the sheet: still active, code unchanged, project open) */
@@ -3022,6 +3052,7 @@ function protectMaster_(ss) {
 }
 
 function protectProject_(ss) {
+  colourProject_(ss);
   clearAppProtections_(ss);
   // also drop the header-only protections of v1.12
   ss.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) { if (p.getDescription() === 'Written by the app') p.remove(); });
@@ -3030,8 +3061,8 @@ function protectProject_(ss) {
     if (sh) protectWarn_(sh.getRange(1, 1, 1, t[1].length), 'Column headers used by the app');
   });
   const tab = function (n) { return ss.getSheetByName(n); };
-  protectWarn_(tab('Promoters').getRange(2, 1, MAX_ROWS, 1), 'Promoter ID: made by the app, it is in the promoter\'s link');
-  protectWarn_(tab('Promoters').getRange(2, 3, MAX_ROWS, 1), 'Code: change it from the portal (New code)');
+  protectWarn_(tab('Promoters').getRange(2, 1, MAX_ROWS, 1), 'Promoter ID: made by the app');
+  protectWarn_(tab('Promoters').getRange(2, 2, MAX_ROWS, 1), 'Code: made by the app, change it from the portal (New code)');
   protectWarn_(tab('Locations').getRange(2, 1, MAX_ROWS, 1), 'Location ID: made by the app');
   protectWarn_(tab('Products').getRange(2, 2, MAX_ROWS, 3), 'Filled automatically from the product name');
   protectWarn_(tab('Results').getRange(2, 1, MAX_ROWS, 11), 'Written by the promoters\' phones');
@@ -3039,5 +3070,142 @@ function protectProject_(ss) {
   protectWarn_(tab('Shifts').getRange(2, 7, MAX_ROWS, 1), 'Hours: worked out from Clock In and Clock Out');
   protectWarn_(tab('Store Time').getRange(2, 1, MAX_ROWS, 7), 'Written by the app at clock out');
   protectWarn_(tab('Catalogue').getRange(1, 1, MAX_ROWS + 1, 5), 'Copy of the SHN Catalogue used by the Products dropdown');
+}
+
+/* ------------------------------------------------------------------ v1.16 */
+
+/* v1.12 sheets had Name in B and Code in C: swap them so the app-made columns come first */
+function migratePromoterCols_(ss) {
+  const sh = ss.getSheetByName('Promoters');
+  const n = Math.max(1, sh.getLastRow());
+  const b = sh.getRange(1, 2, n, 1).getValues(), c = sh.getRange(1, 3, n, 1).getValues();
+  sh.getRange(1, 2, n, 1).setNumberFormat('@').setValues(c.map(function (r) { return [String(r[0])]; }));
+  sh.getRange(1, 3, n, 1).setNumberFormat('General').setValues(b);
+  colourProject_(ss);
+}
+
+/* app-made columns in a darker shade with grey italic text, columns to fill in a lighter one (like the event sheets) */
+const PROJECT_COLORS = [
+  ['Promoters', 1, 2, '#a4c2f4', '#c9daf8', true], ['Promoters', 3, 8, '#c9daf8', '#eef4fd', false],
+  ['Locations', 1, 1, '#a4c2f4', '#c9daf8', true], ['Locations', 2, 5, '#c9daf8', '#eef4fd', false],
+  ['Products', 1, 1, '#d9ead3', '#f1f8ee', false], ['Products', 2, 4, '#b6d7a8', '#d9ead3', true]
+];
+function colourProject_(ss) {
+  PROJECT_COLORS.forEach(function (b) {
+    const sh = ss.getSheetByName(b[0]);
+    if (!sh) return;
+    const n = b[2] - b[1] + 1;
+    sh.getRange(1, b[1], 1, n).setBackground(b[3]);
+    const body = sh.getRange(2, b[1], MAX_ROWS, n).setBackground(b[4]);
+    if (b[5]) body.setFontColor('#6b6b6b').setFontStyle('italic');
+    else body.setFontColor('#000000').setFontStyle('normal');
+  });
+  const pr = ss.getSheetByName('Promoters');
+  if (pr) pr.getRange(1, 1).setNote('Promoter ID and Code (shaded) are filled by the app. To add a promoter, type from Name onwards.');
+  const loc = ss.getSheetByName('Locations');
+  if (loc) loc.getRange(1, 1).setNote('Location ID (shaded) is filled by the app. Type from Store onwards.');
+}
+
+/* store logo: saved in a Logos folder inside the promoters folder, viewable by link, set on every branch of the same store */
+function uploadLogo_(id, locationId, image) {
+  const o = openProject_(id, false);
+  const m = String(image || '').match(/^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) throw userError_('Pick a PNG or JPG picture.', 'invalid');
+  if (m[3].length > 1400000) throw userError_('The picture is too big.', 'invalid');
+  const locs = readLocations_(o.ss);
+  const l = locs.filter(function (x) { return x.id === String(locationId); })[0];
+  if (!l) throw userError_('Store not found.', 'not_found');
+  const parent = DriveApp.getFolderById(String(masterSetting_('PROJECTS_FOLDER_ID') || '').trim());
+  const it = parent.getFoldersByName('Logos');
+  const folder = it.hasNext() ? it.next() : parent.createFolder('Logos');
+  const ext = m[2] === 'jpeg' ? 'jpg' : m[2];
+  const file = folder.createFile(Utilities.newBlob(Utilities.base64Decode(m[3]), m[1], l.store.replace(/[^\w .-]/g, '').trim() + '.' + ext));
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  const url = 'https://lh3.googleusercontent.com/d/' + file.getId();
+  const norm = function (v) { return String(v).toLowerCase().replace(/\s+/g, ' ').trim(); };
+  const sh = o.ss.getSheetByName('Locations');
+  const values = sh.getDataRange().getValues();
+  for (let i = 1; i < values.length; i++) {
+    if (String(values[i][1]).trim() && norm(values[i][1]) === norm(l.store)) sh.getRange(i + 1, 4).setValue(url);
+  }
+  return getProject_(id);
+}
+
+/* Info and Break-even tabs in the event's sheet: a readable copy of what was typed in the portal (written by the app, locked) */
+function writeEventDocs_(ev, only) {
+  if (!ev.sheetId) return;
+  const ss = SpreadsheetApp.openById(ev.sheetId);
+  if (only !== 'breakeven') writeDocTab_(ss, 'Info', 0, infoRows_(ev));
+  if (only !== 'info') writeDocTab_(ss, 'Break-even', 1, breakevenRows_(ev));
+}
+
+function writeDocTab_(ss, name, index, rows) {
+  let sh = ss.getSheetByName(name);
+  const fresh = !sh;
+  if (fresh) sh = ss.insertSheet(name, index);
+  const w = 4;
+  rows = rows.map(function (r) { r = r.slice(0, w); while (r.length < w) r.push(''); return r.map(function (v) { return v == null ? '' : String(v); }); });
+  sh.clear();
+  sh.getRange(1, 1, rows.length, w).setNumberFormat('@').setValues(rows).setVerticalAlignment('top').setWrap(true);
+  rows.forEach(function (r, i) {
+    if (r[0] && r[0].charAt(0) === '#') {
+      sh.getRange(i + 1, 1).setValue(r[0].slice(1));
+      sh.getRange(i + 1, 1, 1, w).setFontWeight('bold').setBackground('#eef1f6');
+    }
+  });
+  sh.getRange(1, 1).setFontSize(14).setFontWeight('bold');
+  if (fresh) {
+    sh.setColumnWidth(1, 230); sh.setColumnWidth(2, 260); sh.setColumnWidth(3, 200); sh.setColumnWidth(4, 160);
+    lockProtection_(sh.getRange(1, 1, MAX_ROWS, w).protect().setDescription(PROTECT_TAG + 'Written by the portal: change it in the portal'));
+  }
+}
+
+function infoRows_(ev) {
+  const i = ev.info || {};
+  const rows = [[ev.name + ' · Info'], ['Copied from the portal (Info). Change it there: this tab is rewritten each time.'], []];
+  rows.push(['#Event']);
+  [['Type', ev.type], ['Venue', ev.venue], ['Dates', ev.startDate + (ev.endDate && ev.endDate !== ev.startDate ? ' to ' + ev.endDate : '')],
+    ['Opening hours', i.openingHours], ['Description', i.description], ['Google Maps', i.mapsLink], ['Stand location', i.standLocation], ['Stand size', i.standSize],
+    ['Setup time', i.setupTime], ['Teardown time', i.teardownTime]].forEach(function (x) { if (x[1]) rows.push(x); });
+  if (i.organizerName || i.organizerPhone || i.organizerEmail) {
+    rows.push([], ['#Organizer']);
+    [['Name', i.organizerName], ['Phone', i.organizerPhone], ['Email', i.organizerEmail]].forEach(function (x) { if (x[1]) rows.push(x); });
+  }
+  if (i.days && i.days.length) {
+    rows.push([], ['#Opening hours per day', 'Opens', 'Closes', 'Hours']);
+    i.days.forEach(function (d) {
+      if (d.closed) return rows.push([d.date, 'Closed', '', '']);
+      let h = '';
+      if (d.open && d.close) {
+        const a = d.open.split(':'), b = d.close.split(':');
+        let m = (Number(b[0]) * 60 + Number(b[1])) - (Number(a[0]) * 60 + Number(a[1]));
+        if (m <= 0) m += 1440;
+        h = String(Math.round(m / 6) / 10);
+      }
+      rows.push([d.date, d.open, d.close, h]);
+    });
+  }
+  const tg = (i.targets || []).filter(function (t) { return t.label || t.target !== ''; });
+  const fixed = { units: 'Total quantity sold', activated: 'Total people activated', margin: 'Gross profit margin %' };
+  if (tg.length) {
+    rows.push([], ['#Targets', 'Target', 'Better when']);
+    tg.forEach(function (t) { rows.push([t.label || fixed[t.key] || t.key, t.target, t.lower ? 'Lower' : 'Higher']); });
+  }
+  if (i.objectives) rows.push([], ['#Objectives'], [i.objectives]);
+  if (i.focusGames && i.focusGames.length) { rows.push([], ['#Focus games']); i.focusGames.forEach(function (g) { rows.push([g]); }); }
+  if (i.notes) rows.push([], ['#Notes'], [i.notes]);
+  return rows;
+}
+
+function breakevenRows_(ev) {
+  const b = ev.breakeven;
+  const rows = [[ev.name + ' · Break-even'], ['Copied from the portal (Break-even). Change it there: this tab is rewritten each time.'], []];
+  if (!b || !Array.isArray(b.summary) || !b.summary.length) {
+    rows.push(['Open the Break-even tab of this event in the portal once (and change any number) to fill this in.']);
+    return rows;
+  }
+  b.summary.slice(0, 120).forEach(function (r) { rows.push(Array.isArray(r) ? r.slice(0, 4).map(function (v) { return String(v == null ? '' : v).slice(0, 300); }) : []); });
+  if (b.savedAt) rows.push([], ['Saved ' + String(b.savedAt).slice(0, 16).replace('T', ' ')]);
+  return rows;
 }
 
