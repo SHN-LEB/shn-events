@@ -50,10 +50,24 @@
     return viewProjects();
   }
 
+  /* show the copy saved on this device at once, then the fresh one from the sheet when it arrives */
+  function swr(key, action, data, apply, redraw, stillHere) {
+    var cached = load(key, null);
+    var fetch = S.api(action, data).then(function (res) {
+      var fresh = JSON.stringify(res);
+      save(key, res);
+      if (!cached || JSON.stringify(cached) !== fresh) { apply(res); if (stillHere()) redraw(); }
+    });
+    if (cached) { apply(cached); redraw(); fetch.catch(function (e) { S.toast('Could not refresh: ' + e.message, true); }); }
+    else return fetch;
+  }
+
   function viewProjects() {
     if (!st.projects) {
       S.loading('Loading projects…');
-      S.api('listProjects').then(function (res) { st.projects = res.projects || []; viewProjects(); }).catch(function (e) { S.showError(e); });
+      var p = swr('shn-cache-projects', 'listProjects', {}, function (res) { st.projects = res.projects || []; }, viewProjects,
+        function () { return location.hash === '#/promoters'; });
+      if (p) p.catch(function (e) { S.showError(e); });
       return;
     }
     var list = st.projects.slice().sort(function (a, b) {
@@ -77,7 +91,7 @@
         '<p class="muted small">Creates the project\'s Google Sheet in the promoters folder.</p>', 'Create project',
       function (box, done, fail) {
         var from = box.querySelector('#pjFrom');
-        box.querySelector('[data-ok]').textContent = 'Creating…';
+        box.querySelector('[data-ok]').textContent = 'Creating the Google Sheet… (about 20–30 s)';
         S.api('createProject', { name: box.querySelector('#pjName').value.trim(), copyFrom: from ? from.value : '' }).then(function (res) {
           done();
           st.projects.push(res.project);
@@ -122,8 +136,10 @@
   function viewProject(id, tab) {
     if (!st.project || st.project.id !== id || !st.project.promoters) {
       S.loading('Loading project…');
-      S.api('getProject', { id: id }).then(function (res) { st.project = res.project; st.report = null; viewProject(id, tab); })
-        .catch(function (e) { S.showError(e, true); });
+      var pr = swr('shn-cache-proj-' + id, 'getProject', { id: id }, function (res) { st.project = res.project; st.report = null; },
+        function () { viewProject(id, (location.hash.split('/')[3] || tab)); },
+        function () { return location.hash.indexOf('#/project/' + encodeURIComponent(id)) === 0 && !document.querySelector('.dialog-backdrop'); });
+      if (pr) pr.catch(function (e) { S.showError(e, true); });
       return;
     }
     var p = st.project;
@@ -153,7 +169,7 @@
     return tabTeam(el, p);
   }
 
-  function refreshProject(res) { st.project = res.project; viewProject(st.project.id, (location.hash.split('/')[3] || 'team')); }
+  function refreshProject(res) { st.project = res.project; save('shn-cache-proj-' + res.project.id, { project: res.project }); viewProject(st.project.id, (location.hash.split('/')[3] || 'team')); }
 
   function promoterForm(x) {
     x = x || {};
@@ -637,7 +653,7 @@
         P.token = res.token;
         P.promoterId = res.promoterId;
         P.k = keys(P.projectId, res.promoterId);
-        start();
+        start(res.data);
       }).catch(function (err) {
         busy = false; code = ''; draw();
         var b = document.getElementById('pcErr');
@@ -656,12 +672,14 @@
   function shift() { return P.k ? load(P.k.shift, null) : null; }
   function setShift(s) { if (s) save(P.k.shift, s); else drop(P.k.shift); }
 
-  function start() {
+  /* shows what is saved on the phone straight away, then checks the sheet in the background */
+  function start(fresh) {
     P.data = load(P.k.data, null);
     S.app.innerHTML = '<div class="promo" id="promo"></div>';
     P.root = document.getElementById('promo');
-    if (P.data) { topbar(P.data.promoter.name); route(); } else P.root.innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>';
-    refresh();
+    if (fresh) { applyData(fresh); route(); flush(); }
+    else if (P.data) { topbar(P.data.promoter.name); route(); refresh(true); }
+    else { P.root.innerHTML = '<div class="loading"><div class="spinner"></div><div>Loading…</div></div>'; refresh(); }
     stopTimers();
     timers.push(setInterval(function () { flush(); }, 60000));
     timers.push(setInterval(function () { refresh(true); }, 15 * 60000));
@@ -671,7 +689,20 @@
 
   function refresh(quiet) {
     return api('promoterData').then(function (res) {
-      P.data = res.data;
+      var before = P.screen;
+      applyData(res.data);
+      // a quiet refresh only redraws when the page itself changes (so a half-made choice is not lost)
+      if (!quiet || before !== routeKey()) route();
+      flush();
+    }).catch(function (err) {
+      if (!P.data && P.root) P.root.innerHTML = '<div class="card empty"><h2>Couldn\'t load</h2><p class="muted">' + S.esc(err.message) + '</p><button class="btn btn-primary" id="rt">Try again</button></div>';
+      var b = document.getElementById('rt');
+      if (b) b.onclick = function () { refresh(); };
+    });
+  }
+
+  function applyData(data) {
+      P.data = data;
       save(P.k.data, P.data);
       topbar(P.data.promoter.name);
       var s = shift();
@@ -685,16 +716,18 @@
       } else if (!srv && s && s.sentIn && !s.out) {
         setShift(null); // clocked out elsewhere
       }
-      if (!quiet || !P.root.querySelector('.pm-tile')) route();
-      flush();
-    }).catch(function (err) {
-      if (!P.data && P.root) P.root.innerHTML = '<div class="card empty"><h2>Couldn\'t load</h2><p class="muted">' + S.esc(err.message) + '</p><button class="btn btn-primary" id="rt">Try again</button></div>';
-      var b = document.getElementById('rt');
-      if (b) b.onclick = function () { refresh(); };
-    });
+  }
+
+  function routeKey() {
+    var s = shift();
+    if (!s || s.out) return s && s.out ? 'done' : 'in';
+    if (s.date !== today()) return 'forgot';
+    if (s.pickStores || !s.locations.length) return 'in';
+    return 'main';
   }
 
   function route() {
+    P.screen = routeKey();
     var s = shift();
     if (!s || s.out) return s && s.out ? screenDone(s) : screenClockIn();
     if (s.date !== today()) return screenForgot(s);

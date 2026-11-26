@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.18.0';
+const APP_VERSION = '1.19.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -2512,17 +2512,33 @@ function buildProjectSheet_(ss, catalogue) {
   pr.setColumnWidth(3, 200);
   const loc = ss.getSheetByName('Locations');
   loc.setColumnWidth(2, 220); loc.setColumnWidth(3, 220);
-  colourProject_(ss);
   ss.getSheetByName('Results').hideColumns(11);
   protectProject_(ss);
   ss.setActiveSheet(pr);
 }
 
+/* the project's row (cached 10 min) and its sheet, opened only when something reads it */
 function openProject_(id, forWrite) {
-  const p = rowToProject_(findProjectRow_(id).values);
+  const p = cachedJson_('projrow_' + id, 600, function () { return rowToProject_(findProjectRow_(id).values); });
   if (forWrite && p.status === 'Closed') throw userError_('This project is closed.', 'closed');
-  return { project: p, ss: SpreadsheetApp.openById(p.sheetId) };
+  let ss = null;
+  return { project: p, get ss() { return ss || (ss = SpreadsheetApp.openById(p.sheetId)); } };
 }
+
+function cacheDrop_(key) { CacheService.getScriptCache().remove(key + '_n'); }
+
+/* promoters, stores and games change rarely: cached for the promoter phones; the portal clears them when it opens a project */
+function promotersCached_(o) {
+  return cachedJson_('promos_' + o.project.id, 120, function () { return readPromoters_(o.ss).map(function (p) { delete p.row; return p; }); });
+}
+function projectStatic_(o) {
+  return cachedJson_('pstatic_' + o.project.id, 300, function () {
+    let pics = {};
+    try { pics = pictures_(); } catch (e) { pics = {}; }
+    return { locations: readLocations_(o.ss), products: readProducts_(o.ss).map(function (x) { return Object.assign(x, { picture: pics[x.ref] || '' }); }) };
+  });
+}
+function dropProjectCache_(id) { cacheDrop_('promos_' + id); cacheDrop_('pstatic_' + id); cacheDrop_('projrow_' + id); }
 
 /* promoters list; rows typed in the sheet without an ID or code get one */
 function readPromoters_(ss) {
@@ -2637,6 +2653,7 @@ function shiftStamp_(v, date) {
 }
 
 function getProject_(id) {
+  dropProjectCache_(id);
   const o = openProject_(id, false);
   const ss = o.ss;
   const promoters = readPromoters_(ss).map(function (p) { delete p.row; return p; });
@@ -2725,6 +2742,7 @@ function setProjectStatus_(id, status) {
   if (status !== 'Open' && status !== 'Closed') throw userError_('Status must be Open or Closed.', 'invalid');
   const f = findProjectRow_(id);
   f.sheet.getRange(f.row, 3).setValue(status);
+  dropProjectCache_(id);
   return getProject_(id);
 }
 
@@ -2734,7 +2752,7 @@ function promoterPublic_(projectId, promoterId) {
   const o = openProject_(projectId, false);
   if (o.project.status === 'Closed') throw userError_('This project is closed.', 'closed');
   if (!promoterId) return { project: o.project.name, name: '' };
-  const p = readPromoters_(o.ss).filter(function (x) { return x.id === String(promoterId); })[0];
+  const p = promotersCached_(o).filter(function (x) { return x.id === String(promoterId); })[0];
   if (!p || !p.active) throw userError_('This link is not active. Ask your manager.', 'not_found');
   return { project: o.project.name, name: p.name };
 }
@@ -2748,7 +2766,8 @@ function promoterLogin_(req) {
   const key = 'pcodefail_' + o.project.id;
   const fails = Number(cache.get(key) || 0);
   if (fails >= 5) throw userError_('Too many wrong codes. Wait 5 minutes and try again.', 'locked');
-  const list = readPromoters_(o.ss);
+  let list = promotersCached_(o);
+  if (!list.some(function (x) { return x.active && x.code === code; })) { cacheDrop_('promos_' + o.project.id); list = promotersCached_(o); } // just typed in the sheet?
   let p;
   if (pid) { // older personal links (?p=&u=)
     p = list.filter(function (x) { return x.id === pid; })[0];
@@ -2765,7 +2784,12 @@ function promoterLogin_(req) {
   cache.remove(key);
   const exp = Date.now() + PROMO_TOKEN_DAYS * 86400000;
   // the token carries the code: changing the code in the portal signs the promoter out
-  return { token: signToken_('promo:' + o.project.id + ':' + p.id + ':' + sha256Hex_(p.code).slice(0, 8), exp), expires: exp, name: p.name, promoterId: p.id, project: o.project.name };
+  const token = signToken_('promo:' + o.project.id + ':' + p.id + ':' + sha256Hex_(p.code).slice(0, 8), exp);
+  // the phone gets its data in the same answer: one round trip less
+  const ctx = { promoter: p, project: o.project };
+  Object.defineProperty(ctx, 'ss', { get: function () { return o.ss; } });
+  ctx.o = o;
+  return { token: token, expires: exp, name: p.name, promoterId: p.id, project: o.project.name, data: promoterData_(o.project.id, ctx) };
 }
 
 /* returns the promoter (checked against the sheet: still active, code unchanged, project open) */
@@ -2774,15 +2798,20 @@ function requirePromoter_(req, projectId) {
   const parts = role.split(':');
   if (parts[0] !== 'promo' || parts[1] !== String(projectId)) throw userError_('Please sign in again.', 'auth');
   const o = openProject_(projectId, true);
-  const p = readPromoters_(o.ss).filter(function (x) { return x.id === parts[2]; })[0];
-  if (!p || !p.active || sha256Hex_(p.code).slice(0, 8) !== parts[3]) throw userError_('Please sign in again.', 'auth');
-  return { promoter: p, project: o.project, ss: o.ss };
+  let p = promotersCached_(o).filter(function (x) { return x.id === parts[2]; })[0];
+  if (!p || !p.active || sha256Hex_(p.code).slice(0, 8) !== parts[3]) {
+    cacheDrop_('promos_' + o.project.id); // check against the sheet itself before signing out
+    p = promotersCached_(o).filter(function (x) { return x.id === parts[2]; })[0];
+    if (!p || !p.active || sha256Hex_(p.code).slice(0, 8) !== parts[3]) throw userError_('Please sign in again.', 'auth');
+  }
+  const ctx = { promoter: p, project: o.project, o: o };
+  Object.defineProperty(ctx, 'ss', { get: function () { return o.ss; } });
+  return ctx;
 }
 
 function promoterData_(projectId, ctx) {
   const ss = ctx.ss, p = ctx.promoter;
-  let pics = {};
-  try { pics = pictures_(); } catch (e) { pics = {}; }
+  const st = projectStatic_(ctx.o);
   const open = readShifts_(ss).filter(function (x) { return x.promoterId === p.id && !x.clockOut; }).pop() || null;
   const counts = {};
   if (open) {
@@ -2795,10 +2824,10 @@ function promoterData_(projectId, ctx) {
   }
   return {
     project: { id: ctx.project.id, name: ctx.project.name }, promoter: { id: p.id, name: p.name },
-    locations: readLocations_(ss),
-    products: readProducts_(ss).map(function (x) { return Object.assign(x, { picture: pics[x.ref] || '' }); }),
+    locations: st.locations,
+    products: st.products,
     openShift: open ? { id: open.id, date: open.date, clockIn: open.clockIn, stores: open.stores } : null,
-    lastStores: open ? null : lastStores_(ss, p.id),
+    lastStores: open ? null : lastStores_(ss, p.id, st.locations),
     counts: counts
   };
 }
@@ -2811,7 +2840,7 @@ function promoterClock_(projectId, ctx, c) {
     const sh = ss.getSheetByName('Shifts');
     const shifts = readShifts_(ss);
     const stamp = clientStamp_(c);
-    const locs = readLocations_(ss);
+    const locs = projectStatic_(ctx.o).locations;
     const storeNames = function (ids) {
       return (ids || []).map(function (id) { const l = locs.filter(function (x) { return x.id === id; })[0]; return l ? l.store + (l.branch ? ' (' + l.branch + ')' : '') : ''; }).filter(Boolean).join(', ');
     };
@@ -2864,8 +2893,9 @@ function promoterSync_(projectId, ctx, s) {
     const x = readShifts_(ss).filter(function (z) { return z.id === String(s.shiftId) && z.promoterId === p.id; })[0];
     if (!x) throw userError_('Shift not found.', 'not_found');
     const locs = {}, prods = {};
-    readLocations_(ss).forEach(function (l) { locs[l.id] = l; });
-    readProducts_(ss).forEach(function (q) { prods[q.ref] = q; });
+    const st = projectStatic_(ctx.o);
+    st.locations.forEach(function (l) { locs[l.id] = l; });
+    st.products.forEach(function (q) { prods[q.ref] = q; });
     const sh = ss.getSheetByName('Results');
     const values = sh.getDataRange().getValues();
     const at = {};
@@ -3228,12 +3258,12 @@ function copyProjectSetup_(srcId, ss) {
 }
 
 /* the stores of the promoter's last shift, for "Same as yesterday" on the clock-in page */
-function lastStores_(ss, pid) {
+function lastStores_(ss, pid, locations) {
   const last = readShifts_(ss).filter(function (x) { return x.promoterId === pid && x.stores; })
     .sort(function (a, b) { return a.clockIn < b.clockIn ? -1 : 1; }).pop();
   if (!last) return null;
   const hay = ', ' + last.stores + ', ';
-  const ids = readLocations_(ss).filter(function (l) {
+  const ids = (locations || readLocations_(ss)).filter(function (l) {
     return hay.indexOf(', ' + l.store + (l.branch ? ' (' + l.branch + ')' : '') + ', ') >= 0;
   }).map(function (l) { return l.id; });
   return ids.length ? { date: last.date, locations: ids } : null;

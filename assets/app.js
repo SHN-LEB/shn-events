@@ -152,7 +152,11 @@
       setTimeout(function () { rf.classList.remove('spin'); }, 900);
     };
     var b = document.getElementById('signOut');
-    if (b) b.onclick = function () { setToken(null); state.events = null; if (window.SHN_PROMO) window.SHN_PROMO.reset(); go('#/login'); };
+    if (b) b.onclick = function () {
+      setToken(null); state.events = null; if (window.SHN_PROMO) window.SHN_PROMO.reset();
+      try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf('shn-cache-') === 0) localStorage.removeItem(k); }); } catch (e) { /* ignore */ }
+      go('#/login');
+    };
   }
 
   /* ---------------- views */
@@ -194,12 +198,19 @@
   function viewHome() {
     if (!state.events) {
       state.overview = null;
-      loading('Loading events…');
-      api('listEvents').then(function (res) {
-        state.events = res.events || [];
-        viewHome();
-      }).catch(function (err) { showError(err); });
-      return;
+      // the list saved on this device shows at once; the fresh one replaces it when it arrives
+      var cached = null;
+      try { cached = JSON.parse(localStorage.getItem('shn-cache-events') || 'null'); } catch (e) { cached = null; }
+      var fetch = api('listEvents').then(function (res) {
+        var fresh = JSON.stringify(res.events || []);
+        try { localStorage.setItem('shn-cache-events', fresh); } catch (e) { /* full */ }
+        if (!cached || JSON.stringify(cached) !== fresh) {
+          state.events = res.events || [];
+          if ((location.hash || '#/') === '#/' && !document.querySelector('.dialog-backdrop')) viewHome();
+        }
+      });
+      if (cached) { state.events = cached; fetch.catch(function (err) { toast('Could not refresh: ' + err.message, true); }); }
+      else { loading('Loading events…'); fetch.catch(function (err) { showError(err); }); return; }
     }
     var events = state.events.slice().sort(function (a, b) {
       var order = { live: 0, draft: 1, upcoming: 2, ended: 3, closed: 4 };
