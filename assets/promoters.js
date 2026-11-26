@@ -344,7 +344,13 @@
 
   function tabGames(el, p) {
     var list = p.products || [];
-    el.innerHTML = '<div class="note">Pick the games in the <b>Products</b> tab of the project sheet: choose each one from the dropdown in column A (Ref, price and category fill in by themselves). Then reload this page.</div>' +
+    var iss = p.productIssues || { fixed: [], unmatched: [] };
+    var issues = (iss.unmatched.length ? '<div class="card pg-warn"><b>' + iss.unmatched.length + (iss.unmatched.length === 1 ? ' game is' : ' games are') +
+        ' not in the SHN Catalogue</b> <span class="small">so ' + (iss.unmatched.length === 1 ? 'it has' : 'they have') + ' no Ref code and promoters don\'t see ' + (iss.unmatched.length === 1 ? 'it' : 'them') + '. ' + (iss.unmatched.length === 1 ? 'It is' : 'They are') + ' red in the Products tab: pick the right name from the dropdown.</span><ul>' +
+        iss.unmatched.map(function (x) { return '<li><b>' + S.esc(x.name) + '</b> <span class="small muted">(row ' + x.row + ')</span>' + (x.suggestion ? ' <span class="small">closest: ' + S.esc(x.suggestion) + '</span>' : '') + '</li>'; }).join('') + '</ul></div>' : '') +
+      (iss.fixed.length ? '<div class="card pg-ok"><b>Fixed automatically</b> <span class="small">(same game, different spelling)</span><ul>' +
+        iss.fixed.map(function (x) { return '<li>' + S.esc(x.from) + ' → <b>' + S.esc(x.to) + '</b></li>'; }).join('') + '</ul></div>' : '');
+    el.innerHTML = issues + '<div class="note">Pick the games in the <b>Products</b> tab of the project sheet: choose each one from the dropdown in column A (Ref, price and category fill in by themselves). Then reload this page.</div>' +
       '<div style="margin:12px 0"><a class="btn btn-ghost btn-sm" href="' + S.esc(p.sheetUrl) + '" target="_blank" rel="noopener">Open Google Sheet</a> <button class="btn btn-ghost btn-sm" id="reloadG">Reload</button></div>' +
       (list.length ? '<div class="card table-wrap"><table class="tbl"><thead><tr><th>Game</th><th>Ref</th><th>Category</th><th class="num">Price</th></tr></thead><tbody>' +
         list.map(function (x) { return '<tr><td><b>' + S.esc(x.name) + '</b></td><td class="muted">' + S.esc(x.ref) + '</td><td>' + S.esc(x.category) + '</td><td class="num">' + S.money(x.price) + '</td></tr>'; }).join('') +

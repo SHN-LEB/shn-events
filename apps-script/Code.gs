@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.19.2';
+const APP_VERSION = '1.20.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -2663,6 +2663,8 @@ function getProject_(id) {
   dropProjectCache_(id);
   const o = openProject_(id, false);
   const ss = o.ss;
+  let productIssues = { fixed: [], unmatched: [] };
+  try { productIssues = checkProductNames_(ss); } catch (e) { logError_({ where: 'checkProductNames', message: String(e && e.message || e) }); }
   const promoters = readPromoters_(ss).map(function (p) { delete p.row; return p; });
   const shifts = readShifts_(ss);
   const open = {};
@@ -2677,7 +2679,7 @@ function getProject_(id) {
   });
   shifts.forEach(function (x) { if (x.date === today) todayIn[x.promoterId] = 1; });
   promoters.forEach(function (p) { p.unitsToday = todayUnits[p.id] || 0; p.activatedToday = todayAct[p.id] || 0; p.workedToday = !!todayIn[p.id]; });
-  return Object.assign(o.project, { promoters: promoters, locations: readLocations_(ss), products: readProducts_(ss) });
+  return Object.assign(o.project, { promoters: promoters, locations: readLocations_(ss), products: readProducts_(ss), productIssues: productIssues });
 }
 
 /* add a promoter (name), or change one: rates, active, new code */
@@ -3136,6 +3138,11 @@ const PROJECT_COLORS = [
   ['Products', 1, 1, '#d9ead3', '#f1f8ee', false], ['Products', 2, 4, '#b6d7a8', '#d9ead3', true]
 ];
 function colourProject_(ss) {
+  const prod = ss.getSheetByName('Products');
+  if (prod) {
+    prod.setConditionalFormatRules([SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied('=AND($A2<>"",$B2="")').setBackground('#f8d7d4').setRanges([prod.getRange(2, 1, MAX_ROWS, 4)]).build()]);
+  }
   PROJECT_COLORS.forEach(function (b) {
     const sh = ss.getSheetByName(b[0]);
     if (!sh) return;
@@ -3259,7 +3266,7 @@ function copyProjectSetup_(srcId, ss, catalogue) {
   const src = SpreadsheetApp.openById(rowToProject_(findProjectRow_(srcId).values).sheetId);
   // matched to the SHN Catalogue ignoring capitals and punctuation ("EXIT: ..." = "Exit: ...", "Spy Labs - X" = "Spy Labs: X"),
   // and written with the catalogue's own spelling; a game that matches nothing is listed instead
-  const key = function (v) { return String(v).toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g, ' ').trim(); };
+  const key = catKey_;
   const inCat = {};
   (catalogue || []).forEach(function (r) { const k = key(r[0]); if (k && !inCat[k]) inCat[k] = String(r[0]).trim(); });
   const skipped = [], seen = {};
@@ -3292,5 +3299,50 @@ function lastStores_(ss, pid, locations) {
 /* "20261126 - Spinneys Christmas", like the event sheets (date the project was created) */
 function projectSheetName_(isoDate, name) {
   return String(isoDate).replace(/-/g, '').slice(0, 8) + ' - ' + name;
+}
+
+/* game names compared the way a person reads them: capitals, punctuation and spaces don't count */
+function catKey_(v) { return String(v).toLowerCase().replace(/[^a-z0-9؀-ۿ]+/g, ' ').trim(); }
+
+/* Products rows with no Ref code (a name that is not in the SHN Catalogue, usually pasted):
+   - same game apart from capitals/punctuation ("Spy Labs - X" for "Spy Labs: X"): replaced with the catalogue spelling
+   - anything else: listed for the portal, with the closest catalogue name */
+function checkProductNames_(ss) {
+  const prod = ss.getSheetByName('Products'), cat = ss.getSheetByName('Catalogue');
+  const out = { fixed: [], unmatched: [] };
+  if (!prod || !cat) return out;
+  const rows = prod.getDataRange().getValues();
+  const bad = [];
+  for (let i = 1; i < rows.length; i++) {
+    const name = String(rows[i][0] || '').trim();
+    if (name && !String(rows[i][1] || '').trim()) bad.push({ row: i + 1, name: name });
+  }
+  if (!bad.length) return out;
+  const names = cat.getDataRange().getValues().slice(1).map(function (r) { return String(r[0] || '').trim(); }).filter(Boolean);
+  const byKey = {};
+  names.forEach(function (n) { const k = catKey_(n); if (k && !byKey[k]) byKey[k] = n; });
+  const words = function (v) { return catKey_(v).split(' ').filter(Boolean); };
+  const closest = function (name) {
+    const a = words(name);
+    let best = '', score = 0;
+    names.forEach(function (n) {
+      const b = words(n);
+      const common = a.filter(function (w) { return b.indexOf(w) >= 0; }).length;
+      const sc = common / Math.max(a.length, b.length);
+      if (sc > score) { score = sc; best = n; }
+    });
+    return score >= 0.5 ? best : '';
+  };
+  bad.forEach(function (b) {
+    const hit = byKey[catKey_(b.name)];
+    if (hit) {
+      prod.getRange(b.row, 1).setValue(hit);
+      out.fixed.push({ from: b.name, to: hit });
+    } else {
+      out.unmatched.push({ name: b.name, row: b.row, suggestion: closest(b.name) });
+    }
+  });
+  if (out.fixed.length) SpreadsheetApp.flush(); // so the Ref codes fill in before the games are read
+  return out;
 }
 
