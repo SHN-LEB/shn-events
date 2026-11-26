@@ -140,7 +140,10 @@
   }
 
   /* ---------------- manager approvals: requests from the staff links, checked every 30 s while the portal is open */
-  var approvals = { pending: [], recent: [] }, apTimer = null, baseTitle = document.title;
+  var approvals = { pending: [], recent: [] }, apTimer = null, baseTitle = 'Events';
+  /* the browser tab says what the page is: "Events", "NDU Christmas Fiesta 2026", "Christmas 2026 · Promoters", "… · Staff" */
+  function setTitle(t) { baseTitle = t || 'Events'; applyTitle(); }
+  function applyTitle() { var n = approvals.pending.length; document.title = (n ? '(' + n + ') ' : '') + baseTitle; }
   function pollApprovals() {
     if (!getToken() || staffEvent || promoLink) return;
     api('listApprovals', {}, { quiet: true }).then(function (res) { approvals = res.approvals || approvals; drawBell(); }).catch(function () { /* next time */ });
@@ -149,7 +152,7 @@
     var n = approvals.pending.length;
     var b = document.getElementById('topBell');
     if (b) { b.classList.toggle('has', n > 0); b.querySelector('b').textContent = n ? String(n) : ''; }
-    document.title = (n ? '(' + n + ') ' : '') + baseTitle;
+    applyTitle();
     var panel = document.getElementById('apPanel');
     if (panel) panel.innerHTML = approvalsHtml();
     if (panel) wireApprovals(panel);
@@ -215,7 +218,7 @@
     var b = document.getElementById('signOut');
     if (b) b.onclick = function () {
       setToken(null); state.events = null; if (window.SHN_PROMO) window.SHN_PROMO.reset();
-      clearInterval(apTimer); apTimer = null; approvals = { pending: [], recent: [] }; document.title = baseTitle;
+      clearInterval(apTimer); apTimer = null; approvals = { pending: [], recent: [] }; applyTitle();
       try { Object.keys(localStorage).forEach(function (k) { if (k.indexOf('shn-cache-') === 0) localStorage.removeItem(k); }); } catch (e) { /* ignore */ }
       go('#/login');
     };
@@ -231,6 +234,7 @@
   }
 
   function viewLogin() {
+    setTitle('Sign in');
     app.innerHTML =
       '<div class="login-wrap"><form class="card login-card" id="loginForm" autocomplete="on">' +
       '<img class="login-logo" src="assets/logo-dark.png" alt="Superheated Neurons">' +
@@ -259,6 +263,7 @@
   }
 
   function viewHome() {
+    setTitle('Events');
     if (!state.events) {
       state.overview = null;
       // the list saved on this device shows at once; the fresh one replaces it when it arrives
@@ -442,6 +447,7 @@
       return;
     }
     var ev = state.event;
+    setTitle(ev.name);
     var draft = ev.status === 'Draft';
     var list = draft ? DRAFT_TABS : TABS;
     if (!list.some(function (t) { return t.id === tab; })) return go('#/event/' + encodeURIComponent(ev.id) + '/' + list[0].id);
@@ -1814,7 +1820,7 @@
     api: api, esc: esc, num: num, money: money, toast: toast, fmtRange: fmtRange, phase: phase,
     version: APP_VERSION, reportError: reportError,
     app: app, topbarRight: topbarRight, isAdmin: function () { return !!getToken(); },
-    go: go, loading: loading, showError: showError, sectionNav: sectionNav
+    go: go, loading: loading, showError: showError, sectionNav: sectionNav, setTitle: setTitle
   };
 
   window.addEventListener('hashchange', onHash);

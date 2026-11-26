@@ -63,6 +63,7 @@
   }
 
   function viewProjects() {
+    S.setTitle('Promoters');
     if (!st.projects) {
       S.loading('Loading projects…');
       var p = swr('shn-cache-projects', 'listProjects', {}, function (res) { st.projects = res.projects || []; }, viewProjects,
@@ -147,6 +148,7 @@
       return;
     }
     var p = st.project;
+    S.setTitle(p.name + ' · Promoters');
     S.app.innerHTML = S.sectionNav('promoters') +
       '<a class="back" href="#/promoters">‹ All projects</a>' +
       '<div class="page-head" style="margin-bottom:6px"><h1>' + S.esc(p.name) + '</h1>' +
@@ -623,6 +625,8 @@
   function stopTimers() { timers.forEach(clearInterval); timers = []; }
 
   function topbar(name) {
+    var pj = P && P.data && P.data.project ? P.data.project.name : '';
+    S.setTitle(name ? name + (pj ? ' · ' + pj : '') : (pj || 'Promoter'));
     S.topbarRight.innerHTML = name ? '<span class="topbar-event">' + S.esc(name) + '</span><button class="link-btn pm-signout" id="pmSignOut">Sign out</button>' : '';
     var b = document.getElementById('pmSignOut');
     if (b) b.onclick = function () {

@@ -67,6 +67,7 @@
   }
 
   function staffTopbar(eventId, name) {
+    if (S.setTitle) S.setTitle((name ? name + ' · ' : '') + 'Staff');
     S.topbarRight.innerHTML = (name ? '<span class="topbar-event">' + S.esc(name) + '</span>' : '') +
       '<button class="link-btn" id="lockPos">Lock</button>';
     document.getElementById('lockPos').onclick = function () {
@@ -81,6 +82,7 @@
   function pinScreen(eventId) {
     S.topbarRight.innerHTML = '';
     var cached = load(dataKey(eventId), {}).event;
+    if (S.setTitle) S.setTitle((cached && cached.name ? cached.name + ' · ' : '') + 'Staff');
     var pin = '';
     S.app.innerHTML =
       '<div class="login-wrap"><div class="card login-card pin-card">' +
@@ -98,7 +100,7 @@
     S.api('posCatalog', { eventId: eventId }, { quiet: true }).then(function (res) {
       save(preKey(eventId), res.catalog);
       var h = document.getElementById('pinEvent');
-      if (h) h.textContent = res.catalog.event.name;
+      if (h) { h.textContent = res.catalog.event.name; S.setTitle(res.catalog.event.name + ' · Staff'); }
       warmPictures(res.catalog.products);
     }).catch(function (err) {
       if ((err.code === 'closed' || err.code === 'draft' || err.code === 'ended') && document.getElementById('pinDots')) {
@@ -109,7 +111,7 @@
     if (!cached) {
       S.api('eventPublic', { eventId: eventId }, { quiet: true }).then(function (res) {
         var h = document.getElementById('pinEvent');
-        if (h) h.textContent = res.event.name;
+        if (h) { h.textContent = res.event.name; S.setTitle(res.event.name + ' · Staff'); }
       }).catch(function (err) {
         if (err.code === 'not_found') {
           S.app.innerHTML = '<div class="card empty"><h2>Event not found</h2><p class="muted">Check the link with your manager.</p></div>';
