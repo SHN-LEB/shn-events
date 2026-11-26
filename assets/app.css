@@ -864,3 +864,10 @@ input[type="date"].input { -webkit-appearance: none; appearance: none; display: 
 input[type="date"].input::-webkit-date-and-time-value { text-align: left; margin: 0; }
 input[type="date"].input:not(:valid)::before, input[type="date"].input:invalid::before { color: var(--muted); }
 @media (max-width: 560px) { .ps-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+
+/* v1.17 clock-in: same as yesterday, Done on top */
+.pm-same { display: grid; gap: 4px; width: 100%; text-align: left; margin: 12px 0 4px; padding: 14px 16px; border-radius: 14px; border: 2px solid var(--accent); background: #fff4ee; color: var(--ink); cursor: pointer; font-size: 15px; }
+.pm-same b { font-size: 17px; color: var(--accent); }
+.pm-same i { font-style: normal; font-weight: 800; color: var(--accent); justify-self: end; }
+.pm-or { margin: 10px 0 8px; }
+.promo #ciDone { margin-bottom: 4px; }

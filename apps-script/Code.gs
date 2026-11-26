@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.17.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -268,7 +268,7 @@ function route_(req) {
     case 'pnl': requireAdmin_(req); return { pnl: pnl_(req.id, req.writeSheet !== false) };
     // promoters
     case 'listProjects': requireAdmin_(req); return { projects: listProjects_() };
-    case 'createProject': requireAdmin_(req); return { project: createProject_(req.name) };
+    case 'createProject': requireAdmin_(req); return { project: createProject_(req.name, req.copyFrom) };
     case 'getProject': requireAdmin_(req); return { project: getProject_(req.id) };
     case 'savePromoter': requireAdmin_(req); return { project: savePromoter_(req.id, req.promoter || {}) };
     case 'saveLocation': requireAdmin_(req); return { project: saveLocation_(req.id, req.location || {}) };
@@ -2449,7 +2449,7 @@ function findProjectRow_(id) {
   throw userError_('Project not found.', 'not_found');
 }
 
-function createProject_(name) {
+function createProject_(name, copyFrom) {
   name = String(name || '').trim().slice(0, 80);
   if (!name) throw userError_('Give the project a name.', 'invalid');
   const lock = LockService.getScriptLock();
@@ -2465,6 +2465,7 @@ function createProject_(name) {
     const ss = SpreadsheetApp.create('SHN LEB Promoters — ' + name);
     DriveApp.getFileById(ss.getId()).moveTo(folder);
     buildProjectSheet_(ss, catalogue);
+    if (copyFrom) copyProjectSetup_(copyFrom, ss);
     const sh = projectsSheet_();
     const r = sh.getLastRow() + 1;
     sh.getRange(r, 1, 1, 5).setNumberFormat('@').setValues([[id, name, 'Open', ss.getUrl(), ss.getId()]]);
@@ -2791,6 +2792,7 @@ function promoterData_(projectId, ctx) {
     locations: readLocations_(ss),
     products: readProducts_(ss).map(function (x) { return Object.assign(x, { picture: pics[x.ref] || '' }); }),
     openShift: open ? { id: open.id, date: open.date, clockIn: open.clockIn, stores: open.stores } : null,
+    lastStores: open ? null : lastStores_(ss, p.id),
     counts: counts
   };
 }
@@ -3207,5 +3209,27 @@ function breakevenRows_(ev) {
   b.summary.slice(0, 120).forEach(function (r) { rows.push(Array.isArray(r) ? r.slice(0, 4).map(function (v) { return String(v == null ? '' : v).slice(0, 300); }) : []); });
   if (b.savedAt) rows.push([], ['Saved ' + String(b.savedAt).slice(0, 16).replace('T', ' ')]);
   return rows;
+}
+
+/* new project from an earlier one: same games (Products) and stores (Locations, with logos). No promoters, no results. */
+function copyProjectSetup_(srcId, ss) {
+  const src = SpreadsheetApp.openById(rowToProject_(findProjectRow_(srcId).values).sheetId);
+  const prods = src.getSheetByName('Products').getDataRange().getValues().slice(1)
+    .map(function (r) { return [String(r[0] || '').trim()]; }).filter(function (r) { return r[0]; });
+  if (prods.length) ss.getSheetByName('Products').getRange(2, 1, prods.length, 1).setValues(prods);
+  const locs = readLocations_(src).map(function (l) { return [l.id, l.store, l.branch, l.logo, l.notes]; });
+  if (locs.length) ss.getSheetByName('Locations').getRange(2, 1, locs.length, 5).setValues(locs);
+}
+
+/* the stores of the promoter's last shift, for "Same as yesterday" on the clock-in page */
+function lastStores_(ss, pid) {
+  const last = readShifts_(ss).filter(function (x) { return x.promoterId === pid && x.stores; })
+    .sort(function (a, b) { return a.clockIn < b.clockIn ? -1 : 1; }).pop();
+  if (!last) return null;
+  const hay = ', ' + last.stores + ', ';
+  const ids = readLocations_(ss).filter(function (l) {
+    return hay.indexOf(', ' + l.store + (l.branch ? ' (' + l.branch + ')' : '') + ', ') >= 0;
+  }).map(function (l) { return l.id; });
+  return ids.length ? { date: last.date, locations: ids } : null;
 }
 

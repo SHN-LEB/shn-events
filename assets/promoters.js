@@ -71,9 +71,14 @@
           '<button class="btn btn-accent" id="newProj2">+ New project</button></div>');
     var open = function () {
       dialog('New project', '<div class="field"><label for="pjName">Project name</label><input class="input" id="pjName" maxlength="80" required placeholder="e.g. Spinneys Christmas 2026"></div>' +
-        '<p class="muted small">Creates the project\'s Google Sheet in the promoters folder. You add promoters, stores and games next.</p>', 'Create project',
+        (list.length ? '<div class="field"><label for="pjFrom">Start from</label><select class="input" id="pjFrom"><option value="">Empty project</option>' +
+          list.map(function (x) { return '<option value="' + S.esc(x.id) + '">Copy games and stores from ' + S.esc(x.name) + '</option>'; }).join('') + '</select>' +
+          '<div class="small muted">Promoters are not copied: add the new team.</div></div>' : '') +
+        '<p class="muted small">Creates the project\'s Google Sheet in the promoters folder.</p>', 'Create project',
       function (box, done, fail) {
-        S.api('createProject', { name: box.querySelector('#pjName').value.trim() }).then(function (res) {
+        var from = box.querySelector('#pjFrom');
+        box.querySelector('[data-ok]').textContent = 'Creating…';
+        S.api('createProject', { name: box.querySelector('#pjName').value.trim(), copyFrom: from ? from.value : '' }).then(function (res) {
           done();
           st.projects.push(res.project);
           st.project = res.project;
@@ -702,20 +707,29 @@
     var locs = P.data.locations || [];
     var picked = {};
     (existing ? existing.locations : []).forEach(function (id) { picked[id] = 1; });
+    // "Same as yesterday": the stores of the last shift (read from the project sheet)
+    var last = !existing && P.data.lastStores ? P.data.lastStores : null;
+    var lastLocs = last ? locs.filter(function (l) { return last.locations.indexOf(l.id) >= 0; }) : [];
+    var y = new Date(); y.setDate(y.getDate() - 1);
+    var yIso = y.getFullYear() + '-' + String(y.getMonth() + 1).padStart(2, '0') + '-' + String(y.getDate()).padStart(2, '0');
+    var lastLabel = last ? (last.date === yIso ? 'Same as yesterday' : last.date === today() ? 'Same as earlier today' : 'Same as last time (' + fmtDate(last.date) + ')') : '';
     P.root.innerHTML = '<div class="co"><h2 class="pm-title">' + (existing ? 'Where are you working?' : 'Clock in') + '</h2>' +
-      '<p class="muted center">' + (existing ? 'Pick your store(s), then press Done.' : 'Pick the store(s) you work at today, then press Done.') + '</p>' +
+      (lastLocs.length ? '<button class="pm-same" id="ciSame"><b>' + S.esc(lastLabel) + '</b><span>' + lastLocs.map(function (l) { return S.esc(storeLabel(l)); }).join(' · ') + '</span><i>Clock in ›</i></button>' +
+        '<p class="muted center small pm-or">or pick below to change</p>'
+        : '<p class="muted center">' + (existing ? 'Pick your store(s), then press Done.' : 'Pick the store(s) you work at today, then press Done.') + '</p>') +
+      '<div id="ciErr"></div><button class="btn btn-accent btn-big btn-block" id="ciDone"' + (locs.length ? '' : ' disabled') + '>Done' + (existing ? '' : ': clock in') + '</button>' +
       (locs.length ? '<div class="pm-stores">' + locs.map(function (l, i) {
         return '<button class="pm-store' + (picked[l.id] ? ' picked' : '') + '" data-l="' + S.esc(l.id) + '" style="--tc:' + TAB_COLORS[i % TAB_COLORS.length] + ';--ti:' + TAB_INK[i % TAB_INK.length] + '">' +
           (l.logo ? '<img src="' + S.esc(l.logo) + '" alt="">' : '') + '<span><b>' + S.esc(l.store) + '</b>' + (l.branch ? '<br>' + S.esc(l.branch) : '') + '</span><i>✓</i></button>';
       }).join('') + '</div>' : '<div class="card empty"><p class="muted">No stores in this project yet. Ask your manager.</p></div>') +
-      '<div id="ciErr"></div><button class="btn btn-accent btn-big btn-block" id="ciDone"' + (locs.length ? '' : ' disabled') + '>Done' + (existing ? '' : ': clock in') + '</button>' +
       '<p class="small muted center" style="margin-top:10px">' + S.esc(P.data.project.name) + '</p></div>';
     Array.prototype.forEach.call(P.root.querySelectorAll('.pm-store'), function (b) {
-      b.onclick = function () { var id = b.getAttribute('data-l'); if (picked[id]) delete picked[id]; else picked[id] = 1; b.classList.toggle('picked', !!picked[id]); };
+      b.onclick = function () {
+        var id = b.getAttribute('data-l'); if (picked[id]) delete picked[id]; else picked[id] = 1; b.classList.toggle('picked', !!picked[id]);
+        document.getElementById('ciErr').innerHTML = '';
+      };
     });
-    document.getElementById('ciDone').onclick = function () {
-      var ids = locs.filter(function (l) { return picked[l.id]; }).map(function (l) { return l.id; });
-      if (!ids.length) { document.getElementById('ciErr').innerHTML = '<div class="form-error">Pick at least one store.</div>'; return; }
+    function go(ids) {
       if (existing) {
         existing.locations = ids; existing.active = ids.indexOf(existing.active) >= 0 ? existing.active : ids[0]; existing.pickStores = false; existing.dirty = true;
         setShift(existing); flush(); return route();
@@ -725,6 +739,13 @@
       S.toast('Clocked in at ' + hhmm(now) + '.');
       flush();
       route();
+    }
+    var same = document.getElementById('ciSame');
+    if (same) same.onclick = function () { go(lastLocs.map(function (l) { return l.id; })); };
+    document.getElementById('ciDone').onclick = function () {
+      var ids = locs.filter(function (l) { return picked[l.id]; }).map(function (l) { return l.id; });
+      if (!ids.length) { document.getElementById('ciErr').innerHTML = '<div class="form-error">Pick at least one store below.</div>'; return; }
+      go(ids);
     };
   }
 
