@@ -9,7 +9,7 @@
  * as a Web app (Execute as: Me, Who has access: Anyone). See README.md.
  */
 
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.15.0';
 
 /* Drive folder that holds the master sheet and every event sheet.
    Leave empty to have setup() create a "SHN Events" folder in My Drive. */
@@ -36,6 +36,7 @@ const MASTER_SETTINGS = [
   ['DEFAULT_OPENING_CASH_USD', 0, 'Copied into each new event'],
   ['DEFAULT_OPENING_CASH_LBP', 0, 'Copied into each new event'],
   ['PROJECTS_FOLDER_ID', '1DUsY6XkDkimaCmbLjhFCZb4d7YhHHOjR', 'Drive folder where each promoters project gets its Google Sheet'],
+  ['SHEET_EDITORS', 'ops1.shn@gmail.com', 'Only these Google accounts (comma separated) can edit the locked parts of every sheet. Empty = warnings only. Run setup after changing it.'],
   ['MANAGER_PIN', '1234', 'Manager PIN for big returns and discounts above the max. Copied into each new event (changeable there). Change it now'],
   ['RETURN_APPROVAL_USD', 51, 'Returns above this amount (USD) need the manager PIN'],
   ['COMMISSION_THRESHOLD', 30, 'Price (USD) from which the higher commission applies. Copied into each new event'],
@@ -146,6 +147,11 @@ function setup() {
   protectMaster_(master);
   listProjects_().forEach(function (p) {
     try { protectProject_(SpreadsheetApp.openById(p.sheetId)); } catch (e) { Logger.log('Could not protect project ' + p.name + ': ' + e); }
+  });
+  // lock the protected ranges of every event sheet already made
+  listEvents_().forEach(function (ev) {
+    if (!ev.sheetId) return;
+    try { relockSheet_(SpreadsheetApp.openById(ev.sheetId)); } catch (e) { Logger.log('Could not lock event ' + ev.name + ': ' + e); }
   });
 
   if (!props.getProperty('TOKEN_SECRET')) {
@@ -789,7 +795,7 @@ function buildInventoryTabs_(ss, catalogue) {
   });
 
   // warn before anyone edits formulas, headers or the event ID (edits stay possible after confirming)
-  const warn = function (range, why) { range.protect().setDescription(why).setWarningOnly(true); };
+  const warn = function (range, why) { lockProtection_(range.protect().setDescription(why)); };
   AUTO_COLS.forEach(function (a) {
     warn(ss.getSheetByName(a[0]).getRange(1, a[1], MAX_ROWS + 1, a[2] - a[1] + 1), 'Filled automatically from the product name');
   });
@@ -2963,7 +2969,39 @@ function payslip_(id, promoterId, from, to) {
 const PROTECT_TAG = 'SHN LEB · ';
 
 function protectWarn_(range, why) {
-  range.protect().setDescription(PROTECT_TAG + why).setWarningOnly(true);
+  lockProtection_(range.protect().setDescription(PROTECT_TAG + why));
+}
+
+/* who may edit locked cells: SHEET_EDITORS plus the account the app runs as (so the app can keep writing) */
+let lockEditors_ = null;
+function lockEditors() {
+  if (lockEditors_) return lockEditors_;
+  let list = [];
+  try { list = String(masterSetting_('SHEET_EDITORS') || ''); } catch (e) { list = ''; }
+  list = String(list).split(/[,;\s]+/).map(function (x) { return x.trim().toLowerCase(); }).filter(function (x) { return /@/.test(x); });
+  let me = '';
+  try { me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase(); } catch (e) { me = ''; }
+  lockEditors_ = { list: list, all: list.concat(me && list.indexOf(me) < 0 ? [me] : []) };
+  return lockEditors_;
+}
+
+/* full lock (only the editors above) when SHEET_EDITORS is set, otherwise a warning */
+function lockProtection_(p) {
+  const ed = lockEditors();
+  if (!ed.list.length) { p.setWarningOnly(true); return p; }
+  p.setWarningOnly(false);
+  try { if (p.canDomainEdit()) p.setDomainEdit(false); } catch (e) { /* not a Workspace domain */ }
+  const keep = {};
+  ed.all.forEach(function (x) { keep[x] = 1; });
+  const out = p.getEditors().filter(function (u) { return !keep[String(u.getEmail()).toLowerCase()]; });
+  if (out.length) p.removeEditors(out);
+  p.addEditors(ed.all);
+  return p;
+}
+
+/* apply the lock to every protected range already in a sheet */
+function relockSheet_(ss) {
+  ss.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(lockProtection_);
 }
 
 function clearAppProtections_(ss) {
