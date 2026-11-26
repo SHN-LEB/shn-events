@@ -2435,6 +2435,8 @@
   }
 
   /* ---------------- WhatsApp summary: a picture (shared with the phone's share sheet), text as a fallback */
+  /* The day summary picture. iPhones only open the share menu straight after a tap, so the picture is prepared first,
+     then a "Share" button opens the menu on its own tap. Where sharing pictures isn't possible, the picture is shown to save. */
   function shareSummary(o) {
     S = window.SHN;
     S.toast('Preparing the summary…');
@@ -2445,11 +2447,17 @@
         var name = 'SHN LEB - ' + d.event + ' - Day ' + (d.day || '') + '.png';
         var file = null;
         try { file = blob && new File([blob], name, { type: 'image/png' }); } catch (e) { file = null; }
-        if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
-          return navigator.share({ files: [file], text: text }).catch(function (err) { if (err && err.name !== 'AbortError') throw err; });
-        }
-        // no picture sharing on this device: show the picture to save, and open WhatsApp with the text
-        showSummaryImage(blob, name, text);
+        if (!(file && navigator.canShare && navigator.canShare({ files: [file] }))) { showSummaryImage(blob, name, text); return; }
+        var url = URL.createObjectURL(blob);
+        var m = modal('<div class="pay-head"><h2>Day summary ready</h2><button class="link-btn" data-close>Close</button></div>' +
+          '<img class="summary-img" src="' + url + '" alt="Day summary">' +
+          '<button class="btn btn-accent btn-big btn-block" id="sumShare" style="margin-top:12px">Share on WhatsApp</button>');
+        m.el.querySelector('#sumShare').onclick = function () {
+          navigator.share({ files: [file], text: text }).then(function () { m.close(); }, function (err) {
+            if (err && err.name === 'AbortError') return; // closed the share menu
+            m.close(); showSummaryImage(blob, name, text);
+          });
+        };
       });
     }).catch(function (err) { S.toast(err.message || 'Could not prepare the summary.', true); throw err; });
   }

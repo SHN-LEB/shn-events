@@ -415,6 +415,7 @@
 
   /* payslip per promoter: a row per day, totals at the bottom; Shifts edited in the sheet show here */
   function tabPayslips(el, p) {
+    preloadSlipLogo();
     var list = (p.promoters || []).slice().sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
     if (!list.length) { el.innerHTML = '<div class="card empty"><p class="muted">No promoters yet.</p></div>'; return; }
     var sel = st.slip || { pid: list[0].id, from: '', to: '' };
@@ -503,6 +504,11 @@
   }
 
   var slipLogo = null;
+  // loaded ahead so "Share picture" opens the share menu straight after the tap (iPhones refuse it after a delay)
+  function preloadSlipLogo() {
+    if (slipLogo) return;
+    var im = new Image(); im.onload = function () { slipLogo = im; }; im.src = 'assets/logo-white.png';
+  }
   function drawSlip(ps) {
     var logoP = slipLogo ? Promise.resolve(slipLogo) : new Promise(function (res) {
       var im = new Image(); im.onload = function () { slipLogo = im; res(im); }; im.onerror = function () { res(null); }; im.src = 'assets/logo-white.png';
@@ -1044,7 +1050,7 @@
 
   window.SHN_PROMO = {
     admin: admin, promoter: promoter, reset: function () { st.projects = null; st.project = null; st.report = null; },
-    slip: { table: function (ps, pr) { S = S || window.SHN; return slipTable(ps, pr); }, pdf: function (ps) { S = S || window.SHN; slipPdf(ps); },
+    slip: { table: function (ps, pr) { S = S || window.SHN; preloadSlipLogo(); return slipTable(ps, pr); }, pdf: function (ps) { S = S || window.SHN; slipPdf(ps); },
       share: function (ps) { S = S || window.SHN; slipShare(ps); }, rateText: function (p) { S = S || window.SHN; return rateText(p); } }
   };
 })();
